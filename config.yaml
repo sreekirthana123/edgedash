@@ -1,0 +1,186 @@
+# EdgeDash Configuration
+# Edit this file with your own details
+
+target_role: "Security Engineer"
+target_city: "Berlin"
+
+# Keywords that appear in job listings you care about
+keywords:
+  - "security"
+  - "data analyst"
+  - "business analyst"
+  - "SQL"
+  - "Power BI"
+  - "Tableau"
+  - "Python"
+
+
+# Your current skills (used for gap analysis)
+my_skills:
+  - "security"
+  - "SQL"
+  - "Python"
+  - "Excel"
+  - "Tableau"
+  - "data cleaning"
+  - "statistics"
+
+# Years of relevant experience
+experience_years: 3
+
+# Path to SQLite database
+db_path: "edgedash.db"
+
+# Minimum fit score (0-100) to surface in dashboard
+min_fit_score: 70
+
+# Enabled job sources
+sources:
+  - "arbeitnow"
+
+# Use mock fetcher for offline development (ignore real sources if true)
+use_mock_fetcher: false
+
+# LLM provider: "gemini" or "ollama"
+llm_provider: "gemini"
+
+# LLM model name
+llm_model: "gemini-3.6-flash"
+
+# Target seniority level for scoring
+target_seniority: "mid"
+
+# Scoring weights (0.0-1.0)
+score_weights:
+  skills_match: 0.45
+  seniority_match: 0.25
+  location_match: 0.15
+  recency: 0.15
+
+# Max listings to score per cycle (rule 21)
+score_batch_size: 25
+
+# Minimum score range; catches a Scorer that emits nearly identical scores.
+min_spread: 20.0
+# Minimum population standard deviation; catches tightly clustered score output.
+min_stdev: 5.0
+# Maximum fraction of empty extractions; catches LLM extraction collapse.
+max_empty_extraction_pct: 0.20
+# Maximum skills in one listing; catches malformed or runaway extraction output.
+max_skills_per_listing: 30
+# Minimum listings supporting the top gap; catches unreliable low-sample gaps.
+min_gap_sample: 3
+# Maximum data age in days; catches stale fetches being treated as current.
+max_data_age_days: 7
+# Maximum questions accepted per day; catches traffic spikes exhausting the free LLM tier.
+daily_query_cap: 200
+
+# Skill aliases — map raw skill strings to canonical forms
+# THIS IS YOURS TO EDIT. Add entries as you encounter new skills or variations.
+# Canonicalisation is deterministic and auditable via `python -m edgedash.skills --audit`
+skill_aliases:
+  # Kubernetes variants
+  "k8s": "kubernetes"
+  "k8": "kubernetes"
+  "k8s/kubernetes": "kubernetes"
+  
+  # Node.js (keep separate from JavaScript)
+  "node": "node.js"
+  "node.js": "node.js"
+  "nodejs": "node.js"
+  
+  # PostgreSQL variants
+  "postgres": "postgresql"
+  "postgresql": "postgresql"
+  "psql": "postgresql"
+  "postgre": "postgresql"
+  
+  # Cloud providers
+  "gcp": "gcp"
+  "google cloud": "gcp"
+  "google cloud platform": "gcp"
+  "aws": "aws"
+  "amazon web services": "aws"
+  "azure": "azure"
+  "microsoft azure": "azure"
+  
+  # ML/AI
+  "ml": "machine learning"
+  "machine learning": "machine learning"
+  "ai": "artificial intelligence"
+  "artificial intelligence": "artificial intelligence"
+  
+  # CI/CD
+  "ci/cd": "ci/cd"
+  "cicd": "ci/cd"
+  "ci cd": "ci/cd"
+  "gitlab ci": "gitlab ci"
+  "github actions": "github actions"
+  
+  # SQL variants
+  "sql": "sql"
+  "t-sql": "t-sql"
+  "tsql": "t-sql"
+  "mysql": "mysql"
+  "mariadb": "mariadb"
+  "oracle": "oracle"
+  
+  # Python frameworks/tools
+  "django": "django"
+  "flask": "flask"
+  "fastapi": "fastapi"
+  "pandas": "pandas"
+  "numpy": "numpy"
+  "scipy": "scipy"
+  "scikit-learn": "scikit-learn"
+  "sklearn": "scikit-learn"
+  
+  # JavaScript frameworks
+  "js": "javascript"
+  "javascript": "javascript"
+  "typescript": "typescript"
+  "ts": "typescript"
+  "react": "react"
+  "vue": "vue"
+  "vue.js": "vue"
+  "angular": "angular"
+  
+  # Databases
+  "mongodb": "mongodb"
+  "mongo": "mongodb"
+  "cassandra": "cassandra"
+  "redis": "redis"
+  "elasticsearch": "elasticsearch"
+  "elastic": "elasticsearch"
+  
+  # Data tools
+  "tableau": "tableau"
+  "power bi": "power bi"
+  "powerbi": "power bi"
+  "looker": "looker"
+  "grafana": "grafana"
+  
+  # Version control
+  "git": "git"
+  "github": "github"
+  "gitlab": "gitlab"
+  "bitbucket": "bitbucket"
+  
+  # Containers/Orchestration
+  "docker": "docker"
+  "container": "docker"
+  "orchestration": "kubernetes"
+  
+  # Testing
+  "pytest": "pytest"
+  "junit": "junit"
+  "selenium": "selenium"
+  "jest": "jest"
+  
+  # Cloud concepts
+  "serverless": "serverless"
+  "lambda": "lambda"
+  "microservices": "microservices"
+  "api": "api"
+  "rest": "rest"
+  "graphql": "graphql"
