@@ -32,13 +32,13 @@ st.markdown(
     """
     <style>
     :root { --ink: #17212b; --muted: #607080; --line: #d9e1e8; --teal: #087f8c; --red: #b42318; --amber: #a15c00; }
-    .stApp { background: #f5f7f8; color: var(--ink); }
-    [data-testid="stHeader"] { background: #f5f7f8; }
+    .stApp { background: var(--background-color, #0f172a); color: var(--text-color, #f8fafc); }
+    [data-testid="stHeader"] { background: transparent; }
     .block-container { max-width: 1380px; padding-top: 2.2rem; }
     .eyebrow { color: var(--teal); font-size: .72rem; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
-    h1 { color: var(--ink); font-size: 2.3rem; letter-spacing: 0; margin: .15rem 0 .3rem; }
-    h2 { color: var(--ink); font-size: 1.15rem; letter-spacing: 0; margin-top: 1.6rem; }
-    .subtitle { color: var(--muted); margin-bottom: 1.4rem; }
+    h1 { color: var(--text-color, #f8fafc); font-size: 2.3rem; letter-spacing: 0; margin: .15rem 0 .3rem; }
+    h2 { color: var(--text-color, #f8fafc); font-size: 1.15rem; letter-spacing: 0; margin-top: 1.6rem; }
+    .subtitle { color: var(--text-color, #f8fafc); opacity: .78; margin-bottom: 1.4rem; }
     .metric { background: white; border: 1px solid var(--line); border-top: 3px solid var(--teal); padding: 1rem 1.1rem; min-height: 6.2rem; }
     .metric-label { color: var(--muted); font-size: .76rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
     .metric-value { color: var(--ink); font-size: 1.45rem; font-weight: 800; margin-top: .35rem; }
@@ -51,6 +51,9 @@ st.markdown(
     .activity-table td { border-top: 1px solid #edf1f3; padding: .72rem .8rem; vertical-align: top; }
     .activity-table .activity-fail { background: #fff1f0; color: #7f1d1d; }
     .activity-table .activity-suspect { background: #fff8e8; color: #7a4a00; }
+    .activity-table .raw-error-detail { color: var(--muted); font-size: .72rem; }
+    .activity-table .raw-error-detail summary { cursor: pointer; }
+    .activity-table .raw-error-detail pre { max-height: 180px; overflow: auto; white-space: pre-wrap; word-break: break-word; margin: .15rem 0 0; padding: .4rem .6rem; border: 1px solid #e0b7b7; background: #fbf0f0; }
     .stDataFrame { border: 1px solid var(--line); }
     </style>
     """,
@@ -101,13 +104,54 @@ def duration_seconds(row: dict) -> float:
         return 0.0
 
 
-def failed_check(notes: str | None) -> str:
-    match = re.search(r"(?:VERDICT:\s*fail\s*[—-]\s*|failed:\s*)([^|;]+)", notes or "", re.I)
-    if match:
-        return match.group(1).strip()
-    if notes and "quota" in notes.lower():
-        return notes
-    return "—"
+# Human-readable one-line summaries for raw cycle_log failure notes.
+# The full raw detail stays in the database (unchanged) and is only revealed
+# behind an expandable <details> element per row, so failed/degraded runs
+# remain visible for diagnosis without dumping raw exception blobs on the page.
+_VERDICT_LABELS = {
+    "score_spread": "Verification failed — score distribution too flat or clustered",
+    "extraction_sanity": "Verification failed — too many listings extracted empty or malformed",
+    "gap_sample_size": "Verification failed — top skill gap has too few supporting listings",
+    "freshness": "Verification failed — data older than the allowed freshness window",
+}
+
+
+def _verdict_summary(check_name: str) -> str:
+    return _VERDICT_LABELS.get(check_name, f"Verification failed — {check_name} check")
+
+
+def summarize_error(notes: str | None) -> str:
+    """Return a short, human-readable one-line summary of raw failure notes."""
+    text = (notes or "").strip()
+    if not text:
+        return "—"
+    lower = text.lower()
+
+    if "quota" in lower or "resource_exhausted" in lower or re.search(r"\b429\b", text):
+        return "Gemini API quota exceeded — retry later"
+    if "timeout" in lower or "timed out" in lower:
+        return "Gemini API timed out — temporarily unavailable"
+    if re.search(
+        r"connectionerror|connection refused|failed to resolve|remote end closed|"
+        r"max retries exceeded|broken pipe|proxyerror",
+        lower,
+    ):
+        return "Network connection failed — temporary issue"
+    if "http error" in lower or "response status" in lower:
+        return "Job board request failed — temporary issue"
+    if lower.startswith("distribution:"):
+        return "Score distribution flagged as suspect — spread too low"
+
+    verdict_match = re.search(r"VERDICT:\s*fail\s*[—-]\s*(\w+)", text, re.I)
+    if verdict_match:
+        return _verdict_summary(verdict_match.group(1).strip())
+    if "gemini" in lower:
+        return "Gemini API temporarily unavailable"
+
+    first_line = text.splitlines()[0].strip()
+    if len(first_line) > 140:
+        return first_line[:140].rstrip() + "…"
+    return first_line or "Agent reported a failure"
 
 
 def retry_count(notes: str | None) -> int:
@@ -124,6 +168,24 @@ def safe_panel_read(label: str, reader, default, errors: list[str]):
         return default
 
 
+def _failure_cell(notes: str | None) -> str:
+    """Render the 'Failed check / observed' cell for a failed/degraded/suspect row.
+
+    Shows a short human-readable summary by default; the full raw notes are
+    shown only behind an expandable <details> element per row.
+    """
+    full = (notes or "").strip()
+    summary = summarize_error(full)
+    cell = escape(summary)
+    if full and full != summary:
+        cell += (
+            ' <details class="raw-error-detail">'
+            "<summary>Show raw error</summary>"
+            f"<pre>{escape(full)}</pre></details>"
+        )
+    return cell
+
+
 def render_activity(rows: list[dict]) -> None:
     if not rows:
         st.info("No cycles yet")
@@ -131,13 +193,17 @@ def render_activity(rows: list[dict]) -> None:
     display_rows = []
     for row in rows:
         status = str(row.get("status", "unknown")).lower()
+        if status in {"failed", "degraded", "suspect"}:
+            failure_cell = _failure_cell(row.get("notes"))
+        else:
+            failure_cell = "—"
         display_rows.append(
             {
                 "Timestamp": format_timestamp(row.get("finished_at") or row.get("started_at")),
                 "Agent run": row.get("agent", "—"),
                 "Skipped": "—" if row.get("records_touched", 0) else "none",
                 "Verdict": status,
-                "Failed check / observed": failed_check(row.get("notes")),
+                "Failed check / observed": failure_cell,
                 "Retries": retry_count(row.get("notes")),
                 "Duration": f"{duration_seconds(row):.1f}s",
             }
@@ -148,8 +214,14 @@ def render_activity(rows: list[dict]) -> None:
     for row in display_rows:
         status = str(row["Verdict"]).lower()
         row_class = "activity-fail" if status in {"failed", "degraded"} else "activity-suspect" if status == "suspect" else ""
-        cells = "".join(f"<td>{escape(str(row[header]))}</td>" for header in headers)
-        row_html.append(f'<tr class="{row_class}">{cells}</tr>')
+        cells = []
+        for header in headers:
+            value = row[header]
+            if header == "Failed check / observed":
+                cells.append(f"<td>{value}</td>")  # value is pre-escaped HTML
+            else:
+                cells.append(f"<td>{escape(str(value))}</td>")
+        row_html.append(f'<tr class="{row_class}">{"".join(cells)}</tr>')
     st.markdown(
         f"""
         <div class="activity-table-wrap">
