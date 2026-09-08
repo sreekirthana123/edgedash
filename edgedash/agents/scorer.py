@@ -3,7 +3,7 @@ import argparse
 import time
 from datetime import datetime
 from edgedash.agents.base import AgentResult
-from edgedash.agents.extractor import extract
+from edgedash.agents.extractor import ExtractionSkippedError, extract
 from edgedash.scoring import score_listing
 from edgedash import llm, storage
 
@@ -81,6 +81,13 @@ class Scorer:
                     status="ok",
                     notes=f"Score: {fit_score}",
                 )
+
+            except ExtractionSkippedError:
+                # Listing is inside the extraction-failure cooldown: it was
+                # already billed to the LLM recently and failed, so skip it
+                # quietly instead of re-calling (avoids burning the daily
+                # quota on repeat failures).
+                continue
 
             except llm.LLMError as e:
                 # Check if it's a quota exhaustion error

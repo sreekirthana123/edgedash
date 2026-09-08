@@ -7,6 +7,10 @@ from contextlib import contextmanager
 from typing import Optional
 from edgedash.runtime import get_runtime_value
 
+# Key used to mark extraction_cache rows that record a failed extraction
+# attempt (write-only sentinel) rather than real extracted facts.
+_EXTRACTION_FAILURE_KEY = "__failed_extraction__"
+
 
 def _using_postgres() -> bool:
     return bool(get_runtime_value("DATABASE_URL"))
@@ -447,7 +451,12 @@ def get_listings(
 
 
 def get_extraction_cache(db_path: str, description_hash: str) -> Optional[dict]:
-    """Get cached extraction by description hash. Returns dict or None."""
+    """Get cached extraction by description hash. Returns dict or None.
+
+    Failure sentinel rows (recorded failed attempts) are hidden here so that
+    fact consumers (Verifier, GapAnalyzer, query tools) only ever see real
+    extractions. Read those markers with get_extraction_failure() instead.
+    """
     import json
 
     with get_conn(db_path) as conn:
@@ -457,25 +466,128 @@ def get_extraction_cache(db_path: str, description_hash: str) -> Optional[dict]:
             (description_hash,),
         )
         row = cursor.fetchone()
-        if row:
-            return json.loads(row["extracted_json"])
+        if row is None:
+            return None
+        return _load_cache_entry(row["extracted_json"])
+
+
+def _load_cache_entry(extracted_json: str) -> Optional[dict]:
+    """Parse a cache row, returning None for missing/failed entries."""
+    import json
+
+    try:
+        data = json.loads(extracted_json)
+    except (ValueError, TypeError):
         return None
+    if isinstance(data, dict) and data.get(_EXTRACTION_FAILURE_KEY) is True:
+        return None
+    return data
 
 
 def set_extraction_cache(db_path: str, description_hash: str, extracted: dict) -> None:
     """Store extraction result in cache."""
     import json
 
+    timestamp = datetime.utcnow().isoformat()
+    payload = json.dumps(extracted)
+    with get_conn(db_path) as conn:
+        cursor = conn.cursor()
+        if _using_postgres():
+            # SQLite's "INSERT OR REPLACE" is not valid Postgres syntax; wrap
+            # it in an upsert so the cache also works with hosted Postgres.
+            cursor.execute(
+                """
+                INSERT INTO extraction_cache (description_hash, extracted_json, cached_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT (description_hash) DO UPDATE SET
+                    extracted_json = EXCLUDED.extracted_json,
+                    cached_at = EXCLUDED.cached_at
+                """,
+                (description_hash, payload, timestamp),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO extraction_cache
+                (description_hash, extracted_json, cached_at)
+                VALUES (?, ?, ?)
+                """,
+                (description_hash, payload, timestamp),
+            )
+        conn.commit()
+
+
+def get_extraction_failure(db_path: str, description_hash: str) -> Optional[dict]:
+    """Return the recorded extraction-failure marker for a description hash.
+
+    Returns a dict like {"__failed_extraction__": True, "attempted_at": ...,
+    "error_tail": ...} when the last attempt failed, or None when the hash is
+    uncached or holds real facts.
+    """
+    import json
+
     with get_conn(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """
-            INSERT OR REPLACE INTO extraction_cache
-            (description_hash, extracted_json, cached_at)
-            VALUES (?, ?, ?)
-            """,
-            (description_hash, json.dumps(extracted), datetime.utcnow().isoformat()),
+            "SELECT extracted_json FROM extraction_cache WHERE description_hash = ?",
+            (description_hash,),
         )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        try:
+            data = json.loads(row["extracted_json"])
+        except (ValueError, TypeError):
+            return None
+        if isinstance(data, dict) and data.get(_EXTRACTION_FAILURE_KEY) is True:
+            return data
+        return None
+
+
+def mark_extraction_failed(
+    db_path: str,
+    description_hash: str,
+    error: Optional[str] = None,
+    attempted_at: Optional[str] = None,
+) -> None:
+    """Record a failed extraction attempt so it is not retried immediately.
+
+    Reuses the existing extraction_cache table (no schema change) by storing a
+    write-only failure sentinel under the same description_hash key. The marker
+    is invisible to get_extraction_cache() so fact consumers are unaffected;
+    extractors read it via get_extraction_failure() to enforce a cooldown
+    window. A later successful extraction (set_extraction_cache) replaces it.
+    """
+    import json
+
+    timestamp = attempted_at or datetime.utcnow().isoformat()
+    payload = {
+        _EXTRACTION_FAILURE_KEY: True,
+        "attempted_at": timestamp,
+        "error_tail": (error or "")[:500],
+    }
+    with get_conn(db_path) as conn:
+        cursor = conn.cursor()
+        if _using_postgres():
+            cursor.execute(
+                """
+                INSERT INTO extraction_cache (description_hash, extracted_json, cached_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT (description_hash) DO UPDATE SET
+                    extracted_json = EXCLUDED.extracted_json,
+                    cached_at = EXCLUDED.cached_at
+                """,
+                (description_hash, json.dumps(payload), timestamp),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO extraction_cache
+                (description_hash, extracted_json, cached_at)
+                VALUES (?, ?, ?)
+                """,
+                (description_hash, json.dumps(payload), timestamp),
+            )
         conn.commit()
 
 

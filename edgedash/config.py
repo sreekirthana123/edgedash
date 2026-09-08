@@ -27,6 +27,7 @@ class Config:
     min_gap_sample: int
     max_data_age_days: int
     daily_query_cap: int
+    extraction_retry_hours: float = 24.0
 
     @classmethod
     def load(cls, config_path: str = "config.yaml") -> "Config":
@@ -68,6 +69,7 @@ class Config:
             "min_gap_sample": 3,
             "max_data_age_days": 7,
             "daily_query_cap": 200,
+            "extraction_retry_hours": 24.0,
         }
 
         for key, default_value in defaults.items():
@@ -97,4 +99,5 @@ class Config:
             min_gap_sample=data["min_gap_sample"],
             max_data_age_days=data["max_data_age_days"],
             daily_query_cap=data["daily_query_cap"],
+            extraction_retry_hours=data["extraction_retry_hours"],
         )

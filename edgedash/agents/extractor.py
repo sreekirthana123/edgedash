@@ -1,5 +1,6 @@
 import hashlib
 import re
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from edgedash import llm, storage
 
@@ -118,6 +119,30 @@ def _coerce_result(extracted: dict) -> dict:
     return extracted
 
 
+class ExtractionSkippedError(Exception):
+    """Raised when a listing is inside the extraction-failure cooldown window.
+
+    The Scorer treats this as a quiet skip: no LLM call is made and no failed
+    cycle row is logged. The listing simply stays unscored until the cooldown
+    expires.
+    """
+
+
+def _within_cooldown(attempted_at, retry_hours: float) -> bool:
+    """Return True when the failed attempt is still inside the cooldown window."""
+    if not attempted_at or retry_hours <= 0:
+        return False
+    try:
+        attempted_dt = datetime.fromisoformat(attempted_at)
+    except (ValueError, TypeError):
+        return False
+    if attempted_dt.tzinfo is None:
+        # Assume UTC for naive timestamps (storage writes UTC).
+        attempted_dt = attempted_dt.replace(tzinfo=timezone.utc)
+    elapsed = (datetime.now(timezone.utc) - attempted_dt).total_seconds()
+    return elapsed < retry_hours * 3600.0
+
+
 def extract(listing: dict, config, db_path: str) -> dict:
     """Extract structured facts from job listing with caching.
 
@@ -131,6 +156,7 @@ def extract(listing: dict, config, db_path: str) -> dict:
 
     Raises:
         llm.LLMError: If LLM call fails (caller handles per rule 17)
+        ExtractionSkippedError: If a recent failed attempt is still in cooldown
     """
 
     description = listing.get("description", "")
@@ -148,6 +174,18 @@ def extract(listing: dict, config, db_path: str) -> dict:
     cleaned_description = _strip_html(description)
     description_hash = _hash_description(description)
 
+    # Do not re-bill the LLM for a listing whose last extraction attempt
+    # failed recently (timeout / transient API error). Skip quietly while
+    # the cooldown window is open; the listing stays unscored until then.
+    failure = storage.get_extraction_failure(db_path, description_hash)
+    if failure is not None:
+        retry_hours = float(getattr(config, "extraction_retry_hours", 24.0))
+        if _within_cooldown(failure.get("attempted_at"), retry_hours):
+            raise ExtractionSkippedError(
+                "Extraction skipped: previous attempt failed "
+                f"({failure.get('error_tail') or 'unknown error'})"
+            )
+
     # Check extraction cache FIRST (rule 18)
     cached = storage.get_extraction_cache(db_path, description_hash)
     if cached is not None:
@@ -158,7 +196,21 @@ def extract(listing: dict, config, db_path: str) -> dict:
     truncated = cleaned_description[:6000]
     prompt = PROMPT_TEMPLATE.format(description=truncated)
 
-    extracted = llm.complete_json(prompt, EXTRACTION_SCHEMA, config)
+    try:
+        extracted = llm.complete_json(prompt, EXTRACTION_SCHEMA, config)
+    except (llm.LLMError, ValueError, KeyError, TypeError) as error:
+        # Record the failure so this listing is not retried within the
+        # cooldown window. Quota exhaustion (429) is deliberately NOT cached:
+        # the daily cap resets on its own and the listing should be retried
+        # normally once the quota is back.
+        error_text = str(error)
+        if not (
+            "429" in error_text
+            or "RESOURCE_EXHAUSTED" in error_text
+            or "quota" in error_text.lower()
+        ):
+            storage.mark_extraction_failed(db_path, description_hash, error_text)
+        raise
 
     # Normalize and coerce result
     extracted = _coerce_result(extracted)

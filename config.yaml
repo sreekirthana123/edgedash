@@ -57,8 +57,11 @@ score_weights:
   location_match: 0.15
   recency: 0.15
 
-# Max listings to score per cycle (rule 21)
-score_batch_size: 25
+# Max listings to score per cycle (rule 21).
+# Kept low (8) to stay inside the Gemini free-tier daily request budget:
+# 8 for the main pass + up to 8 for the single Verifier-triggered retry
+# (rule 36) + headroom for the dashboard's "Ask your data" (2 calls/question).
+score_batch_size: 8
 
 # Minimum score range; catches a Scorer that emits nearly identical scores.
 min_spread: 20.0
@@ -74,6 +77,11 @@ min_gap_sample: 3
 max_data_age_days: 7
 # Maximum questions accepted per day; catches traffic spikes exhausting the free LLM tier.
 daily_query_cap: 200
+# Hours to wait before retrying extraction for a listing whose previous
+# extraction attempt failed (timeout / transient API error). Failed attempts
+# are cached in extraction_cache and skipped for this long, so a flaky or
+# overloaded model does not get re-billed for the same listing every cycle.
+extraction_retry_hours: 24
 
 # Skill aliases — map raw skill strings to canonical forms
 # THIS IS YOURS TO EDIT. Add entries as you encounter new skills or variations.
