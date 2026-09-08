@@ -293,24 +293,27 @@ def main() -> None:
         "How many listings are scored?",
     ]
     example_columns = st.columns(3)
-    example_question = None
     for column, example in zip(example_columns, example_questions):
         if column.button(
             example,
             key=f"example_{example}",
             disabled=daily_cap_reached,
         ):
-            example_question = example
+            # Only pre-fill the question input. The query must be triggered
+            # solely by the "Ask" button: every question costs Gemini API
+            # quota (2 calls each), so a suggestion click must never fire a
+            # query on its own.
+            st.session_state["query_question"] = example
     question = st.text_input(
         "Question",
-        value=example_question or st.session_state.get("query_question", ""),
+        key="query_question",
         placeholder="Which companies are hiring this week?",
         disabled=daily_cap_reached,
     )
-    question_to_ask = example_question or question
+    question_to_ask = question
     if (
         not daily_cap_reached
-        and (example_question or st.button("Ask", type="primary"))
+        and st.button("Ask", type="primary")
         and question_to_ask.strip()
     ):
         try:
