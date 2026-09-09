@@ -144,7 +144,8 @@ def init_db(db_path: str) -> None:
                 fetched_at TEXT NOT NULL,
                 fit_score INTEGER,
                 fit_reason TEXT,
-                seniority TEXT
+                seniority TEXT,
+                verified_at TEXT
             )
             """
         )
@@ -153,6 +154,8 @@ def init_db(db_path: str) -> None:
         }
         if "seniority" not in listing_columns:
             cursor.execute("ALTER TABLE listings ADD COLUMN seniority TEXT")
+        if "verified_at" not in listing_columns:
+            cursor.execute("ALTER TABLE listings ADD COLUMN verified_at TEXT")
 
         cursor.execute(
             """
@@ -238,7 +241,7 @@ def _init_postgres(db_path: str) -> None:
                 id TEXT PRIMARY KEY, title TEXT NOT NULL, company TEXT NOT NULL,
                 location TEXT NOT NULL, url TEXT NOT NULL, description TEXT,
                 source TEXT NOT NULL, posted_at TEXT, fetched_at TEXT NOT NULL,
-                fit_score INTEGER, fit_reason TEXT, seniority TEXT
+                fit_score INTEGER, fit_reason TEXT, seniority TEXT, verified_at TEXT
             )
             """,
             """CREATE TABLE IF NOT EXISTS skill_gaps (
@@ -268,6 +271,7 @@ def _init_postgres(db_path: str) -> None:
         for statement in statements:
             cursor.execute(statement)
         cursor.execute("ALTER TABLE listings ADD COLUMN IF NOT EXISTS seniority TEXT")
+        cursor.execute("ALTER TABLE listings ADD COLUMN IF NOT EXISTS verified_at TEXT")
         cursor.execute("ALTER TABLE query_log ADD COLUMN IF NOT EXISTS reason TEXT")
         conn.commit()
 
@@ -336,6 +340,54 @@ def count_unscored(db_path: str) -> int:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) as count FROM listings WHERE fit_score IS NULL")
         return cursor.fetchone()["count"]
+
+
+def count_unverified(db_path: str) -> int:
+    """Return count of scored listings not yet part of a passing verification.
+
+    A listing is "unverified" once it has a fit_score but no verified_at
+    timestamp (its output has not yet been accepted by a passing Verifier
+    run). Rule 38: only a passing verification may promote output into the
+    verified pool, so fresh unverified data never displaces verified data.
+    """
+    with get_conn(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) as count FROM listings "
+            "WHERE fit_score IS NOT NULL AND verified_at IS NULL"
+        )
+        return cursor.fetchone()["count"]
+
+
+def mark_verified(
+    db_path: str,
+    before: Optional[str] = None,
+) -> int:
+    """Mark produced (scored) listings as verified. Returns rows updated.
+
+    Rule 38: the orchestrator calls this ONLY after a PASSING Verifier run.
+    A failing verification never calls mark_verified, so the last known-good
+    verified state is left untouched.
+
+    Args:
+        before: Optional ISO timestamp bound. When provided, only listings
+            fetched at or before this time are marked, so output produced
+            after the verification moment can never be promoted by it.
+    """
+    timestamp = datetime.utcnow().isoformat()
+    parameters = [timestamp]
+    query = (
+        "UPDATE listings SET verified_at = ? "
+        "WHERE fit_score IS NOT NULL AND verified_at IS NULL"
+    )
+    if before:
+        query += " AND (fetched_at IS NULL OR fetched_at <= ?)"
+        parameters.append(before)
+    with get_conn(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, parameters)
+        conn.commit()
+        return cursor.rowcount
 
 
 def last_fetch_time(db_path: str) -> Optional[str]:
@@ -613,13 +665,17 @@ def save_score(
     fit_score: int,
     fit_reason: str,
 ) -> None:
-    """Update a listing with its fit score and reason."""
+    """Update a listing with its fit score and reason.
+
+    A re-scored listing is fresh output and therefore re-enters the
+    unverified pool (rule 38) until the next passing Verifier run promotes it.
+    """
     with get_conn(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
             UPDATE listings
-            SET fit_score = ?, fit_reason = ?
+            SET fit_score = ?, fit_reason = ?, verified_at = NULL
             WHERE id = ?
             """,
             (fit_score, fit_reason, listing_id),

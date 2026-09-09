@@ -39,6 +39,51 @@ def _retry_agent_for_verification(failed_checks: tuple) -> str | None:
     return None
 
 
+def _verifier_notes(result) -> str:
+    """Human-readable Verifier notes for the cycle log."""
+    notes = getattr(result, "notes", None)
+    if notes:
+        return str(notes)
+    verdict = getattr(result, "verdict", None)
+    if verdict is not None and getattr(verdict, "summary", None):
+        return str(verdict.summary)
+    return "VERDICT: pass"
+
+
+def _record_verifier_result(config, storage_module, result, status: str) -> None:
+    """Log the Verifier's cycle-log row for the dashboard activity panel.
+
+    Rule 32: cycle logging is best-effort — it must never break the cycle.
+    """
+    finished = datetime.now(timezone.utc).isoformat()
+    try:
+        storage_module.log_cycle(
+            config.db_path,
+            agent="Verifier",
+            started_at=finished,
+            finished_at=finished,
+            records_touched=0,
+            status=status,
+            notes=_verifier_notes(result),
+        )
+    except Exception:
+        pass
+
+
+def _mark_output_verified(config, storage_module) -> None:
+    """Rule 38: promote produced output to verified after a passing verdict.
+
+    Called ONLY on the Verifier pass path. A failed verification never calls
+    this, so the last known-good verified state is never overwritten.
+    """
+    try:
+        mark = getattr(storage_module, "mark_verified", None)
+        if mark is not None:
+            mark(config.db_path, before=datetime.now(timezone.utc).isoformat())
+    except Exception:
+        pass
+
+
 def run_cycle(config, storage_module=storage):
     """Run one complete state-driven cycle.
     
@@ -149,6 +194,14 @@ def run_cycle(config, storage_module=storage):
                     result.status != "ok"
                     or (verdict is not None and not verdict.passed)
                 )
+                # Log a Verifier row on both outcomes so the dashboard activity
+                # panel (which deliberately keeps failures visible) shows it.
+                _record_verifier_result(
+                    config,
+                    storage_module,
+                    result,
+                    status="failed" if verification_failed else "ok",
+                )
                 if verification_failed:
                     final_verdict = verdict
                     failed_checks = tuple(
@@ -203,9 +256,22 @@ def run_cycle(config, storage_module=storage):
                         "verdict": second_verdict.verdict,
                     })
                     final_verdict = second_verdict.verdict
+                    _record_verifier_result(
+                        config,
+                        storage_module,
+                        second_verdict,
+                        status="failed" if second_verdict.status != "ok" else "ok",
+                    )
                     if second_verdict.status != "ok":
                         cycle_outcome = "degraded"
+                    else:
+                        # Rule 38: promote only after a passing re-verification.
+                        _mark_output_verified(config, storage_module)
                     break
+                else:
+                    # Rule 38: the Verifier passed — promote produced output.
+                    final_verdict = verdict
+                    _mark_output_verified(config, storage_module)
         
         except Exception as e:
             # Rule 32: Log failure, continue with remaining plan

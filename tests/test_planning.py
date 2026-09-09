@@ -154,13 +154,14 @@ class TestBuildPlan:
         
         plan = build_plan(state, config)
         
-        assert len(plan.tasks) == 3
+        assert len(plan.tasks) == 4
         assert all(not t.skipped for t in plan.tasks)
         
         # Check agent order
         assert plan.tasks[0].agent_name == "Fetcher"
         assert plan.tasks[1].agent_name == "Scorer"
         assert plan.tasks[2].agent_name == "GapAnalyzer"
+        assert plan.tasks[3].agent_name == "Verifier"
         
         # Check reasons
         assert "never fetched" in plan.tasks[0].reason
@@ -182,13 +183,17 @@ class TestBuildPlan:
         
         plan = build_plan(state, config)
         
-        assert len(plan.tasks) == 3
+        assert len(plan.tasks) == 4
         assert all(t.skipped for t in plan.tasks)
         
         # Check reasons
         assert "hours_since_fetch=2.0 < 6" in plan.tasks[0].reason
         assert "unscored_count=0" in plan.tasks[1].reason
         assert "gaps_stale=false" in plan.tasks[2].reason
+
+        # Verifier: skipped — nothing produced, nothing pending
+        assert plan.tasks[3].agent_name == "Verifier"
+        assert plan.tasks[3].skipped is True
     
     def test_plan_only_unscored(self):
         """Plan when only Scorer should run."""
@@ -214,6 +219,11 @@ class TestBuildPlan:
         
         # GapAnalyzer: skipped (not stale)
         assert plan.tasks[2].skipped is True
+
+        # Verifier: runs last because the cycle will score new output
+        assert plan.tasks[3].agent_name == "Verifier"
+        assert plan.tasks[3].skipped is False
+        assert "new output" in plan.tasks[3].reason
     
     def test_plan_gaps_stale_no_unscored(self):
         """Plan when gaps are stale but nothing unscored (unusual but valid)."""
@@ -237,7 +247,46 @@ class TestBuildPlan:
         # GapAnalyzer: running (gaps are stale)
         assert plan.tasks[2].skipped is False
         assert "gaps_stale=true" in plan.tasks[2].reason
+
+        # Verifier: skipped — no fetch, no score, no unverified backlog
+        assert plan.tasks[3].agent_name == "Verifier"
+        assert plan.tasks[3].skipped is True
     
+    def test_verifier_scheduled_after_gap_analyzer_when_fetch_will_run(self):
+        """Verifier is the final task when the cycle will fetch new data."""
+        config = MockConfig(fetch_interval_hours=6)
+        state = {
+            "last_fetch_at": None,
+            "hours_since_fetch": None,
+            "unscored_count": 0,
+            "gaps_computed_at": None,
+            "gaps_stale": True,
+            "last_cycle_started_at": None,
+        }
+        plan = build_plan(state, config)
+        assert plan.tasks[3].agent_name == "Verifier"
+        assert plan.tasks[3].skipped is False
+        assert "new output" in plan.tasks[3].reason
+
+    def test_verifier_scheduled_when_unverified_backlog_exists(self):
+        """Verifier runs even without fetch/score when earlier output is
+        still unverified."""
+        config = MockConfig(fetch_interval_hours=6)
+        two_hours_ago = datetime(2026, 9, 5, 10, 0, 0, tzinfo=timezone.utc).isoformat()
+        state = {
+            "last_fetch_at": two_hours_ago,
+            "hours_since_fetch": 2.0,
+            "unscored_count": 0,
+            "gaps_computed_at": two_hours_ago,
+            "gaps_stale": False,
+            "unverified_count": 4,
+            "last_cycle_started_at": two_hours_ago,
+        }
+        plan = build_plan(state, config)
+        assert plan.tasks[3].agent_name == "Verifier"
+        assert plan.tasks[3].skipped is False
+        assert "unverified_count=4" in plan.tasks[3].reason
+
     def test_plan_render_nothing_to_do(self):
         """Test the rendered plan output for 'nothing to do' state."""
         config = MockConfig(fetch_interval_hours=6)
@@ -258,6 +307,7 @@ class TestBuildPlan:
         assert "X Fetcher" in rendered
         assert "X Scorer" in rendered
         assert "X GapAnalyzer" in rendered
+        assert "X Verifier" in rendered
         assert "hours_since_fetch=2.0 < 6" in rendered
         assert "unscored_count=0" in rendered
         assert "gaps_stale=false" in rendered

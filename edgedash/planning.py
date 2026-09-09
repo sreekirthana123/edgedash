@@ -155,16 +155,37 @@ def build_plan(state: dict, config) -> Plan:
         ))
 
     # === VERIFIER ===
+    # Verify whenever this cycle will produce new output (a fetch or a score
+    # is planned) or when unverified output from an earlier cycle exists.
+    # The Verifier is read-only and makes NO LLM calls, so running it is
+    # effectively free and keeps rule 38's "only passing cycles are read"
+    # invariant fresh. It always runs LAST, after the GapAnalyzer.
     unverified_count = state.get("unverified_count", 0)
-    if unverified_count > 0:
+    produced_output = should_fetch or should_score
+    should_verify = produced_output or unverified_count > 0
+    if should_verify:
+        if produced_output:
+            reason = "cycle produced new output (fetch or score)"
+        else:
+            reason = f"unverified_count={unverified_count}"
         tasks.append(Task(
             agent_name="Verifier",
             goal="verify cycle output plausibility",
             stop_conditions={
                 "max_seconds": 60,
             },
-            reason=f"unverified_count={unverified_count}",
+            reason=reason,
             skipped=False,
         ))
-    
+    else:
+        tasks.append(Task(
+            agent_name="Verifier",
+            goal="verify cycle output plausibility",
+            stop_conditions={
+                "max_seconds": 60,
+            },
+            reason="no new output or unverified backlog — nothing to verify",
+            skipped=True,
+        ))
+
     return Plan(tasks=tasks)
