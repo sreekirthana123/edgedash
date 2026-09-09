@@ -1,0 +1,99 @@
+# EdgeDash cycle — scheduled, idempotent agent run (rules 48-51).
+#
+# What this does, in order:
+#   1. Check out the repo
+#   2. Set up Python 3.12 (from .python-version) with a pip cache
+#   3. Install pinned requirements
+#   4. Migrate the database schema (safe to re-run: CREATE TABLE IF NOT EXISTS)
+#   5. Run the full cycle: fetch -> score -> gap analysis -> verify
+#   6. Upload the cycle console log as an artifact (even on failure)
+#
+# Rules it implements (see .kiro/steering/edgedash.md):
+#   - 48  No secret is ever printed/logged. Secrets are injected by GitHub as
+#         environment variables only; GitHub masks their values in logs and no
+#         step below echoes them.
+#   - 49  This scheduled job and the dashboard are separate processes that share
+#         only the database.
+#   - 51  Idempotent, safe to run twice, hard timeout, stays inside free tier.
+#         Per rule 36, retries are capped INSIDE the cycle; this workflow does
+#         NOT retry failed jobs, so a failure surfaces once, loudly.
+
+name: EdgeDash cycle
+
+on:
+  schedule:
+    # Daily at 06:00 Asia/Kolkata (IST, UTC+5:30)  ==  00:30 UTC.
+    # GitHub Actions cron is fixed UTC (no timezone field). IST has no DST,
+    # so this never drifts across the year.
+    #
+    #   cron: "30 0 * * *"
+    #          │  │ │ │ └── day-of-week (0-6, * = every day)
+    #          │  │ │ └──── month (* = every month)
+    #          │  │ └────── day-of-month (* = every day)
+    #          │  └──────── hour, UTC (0 = midnight UTC)
+    #          └─────────── minute (30)
+    - cron: "30 0 * * *"
+  # Manual trigger: "Actions" tab -> "EdgeDash cycle" -> "Run workflow"
+  # -> branch "master" -> green "Run workflow" button.
+  workflow_dispatch:
+
+# Don't let two cycles overlap: each run spends Gemini API quota (free tier:
+# 20 calls/day, batch is 8). Runs are idempotent (rule 51), so a newer run
+# cancelling an older one loses nothing.
+concurrency:
+  group: edgedash-cycle
+  cancel-in-progress: true
+
+jobs:
+  cycle:
+    name: Fetch, score, analyze, verify
+    runs-on: ubuntu-latest
+    # Rule 51 hard timeout: the whole job is killed at 10 minutes. (Individual
+    # steps below time out earlier so the artifact upload always gets a chance.)
+    timeout-minutes: 10
+
+    # Rule 48: these go straight into the process environment from GitHub
+    # Secrets (Settings -> Secrets and variables -> Actions). GitHub redacts
+    # the values in logs; no step below echoes or exports them.
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version   # 3.12
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Migrate database schema
+        shell: bash
+        # CREATE TABLE IF NOT EXISTS — safe to repeat every run.
+        # `tee -a` streams output to the Actions log AND to the artifact file.
+        # GitHub's bash default is `-e -o pipefail`, so a failing python exits
+        # the step (the pipe never masks a failure).
+        timeout-minutes: 2
+        run: python -u -m edgedash.storage --migrate | tee -a cycle.log
+
+      - name: Run EdgeDash cycle
+        shell: bash
+        # Fails the job if the cycle exits non-zero (visible failure ->
+        # notification). No retry here: rule 36 caps retries inside the cycle.
+        # 8-min cap so a runaway cycle can't eat the whole 10-min job budget
+        # and starve the artifact upload below.
+        timeout-minutes: 8
+        run: python -u run_cycle.py | tee -a cycle.log
+
+      - name: Upload cycle log
+        if: always()      # Upload even when the cycle/migrate failed.
+        uses: actions/upload-artifact@v4
+        with:
+          name: cycle-log
+          path: cycle.log
