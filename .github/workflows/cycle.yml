@@ -6,7 +6,8 @@
 #   3. Install pinned requirements
 #   4. Migrate the database schema (safe to re-run: CREATE TABLE IF NOT EXISTS)
 #   5. Run the full cycle: fetch -> score -> gap analysis -> verify
-#   6. Upload the cycle console log as an artifact (even on failure)
+#   6. Health-check the deployed system (read-only; fails the job if unhealthy)
+#   7. Upload the cycle console log as an artifact (even on failure)
 #
 # Rules it implements (see .kiro/steering/edgedash.md):
 #   - 48  No secret is ever printed/logged. Secrets are injected by GitHub as
@@ -90,6 +91,17 @@ jobs:
         # and starve the artifact upload below.
         timeout-minutes: 8
         run: python -u run_cycle.py | tee -a cycle.log
+
+      - name: Health check
+        shell: bash
+        # Read-only health report (python -m edgedash.health): newest listing
+        # age, successful cycle freshness, last 3 verification outcomes, and
+        # DB reachability. Runs AFTER the cycle and never blocks it; makes no
+        # LLM calls and prints nothing sensitive. Fails the job when unhealthy
+        # so the normal GitHub notification fires. Uses DATABASE_URL from the
+        # job env (GEMINI_API_KEY is not needed here).
+        timeout-minutes: 2
+        run: python -u -m edgedash.health | tee -a cycle.log
 
       - name: Upload cycle log
         if: always()      # Upload even when the cycle/migrate failed.

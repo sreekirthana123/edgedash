@@ -23,10 +23,26 @@ def get_runtime_value(name: str, default: str | None = None) -> str | None:
     return value or default
 
 
-def redact_error(error: BaseException) -> str:
-    """Return an error message with connection strings and key-like values removed."""
-    message = str(error)
-    message = re.sub(r"(?:postgres(?:ql)?|mysql)://\S+", "<redacted connection string>", message, flags=re.I)
-    message = re.sub(r"AQ\.[A-Za-z0-9_-]+", "<redacted API key>", message)
-    message = re.sub(r"AIza[A-Za-z0-9_-]+", "<redacted API key>", message)
-    return message
+def redact_error(message: str | BaseException) -> str:
+    """Return an error message safe to log or display, with credentials removed.
+
+    Deliberately conservative: driver error messages (e.g. psycopg) frequently
+    quote just a fragment of a connection string — the password/userinfo
+    without the ``postgresql://`` scheme. So we also replace any token that
+    contains ``userinfo@host`` even when no scheme is present. See rule 48.
+    """
+    text = str(message)
+    text = re.sub(
+        r"(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?)://[^\s'\"]+",
+        "<redacted connection string>",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"[^\s'\"]+@[^\s'\"]+",
+        "<redacted credential/host>",
+        text,
+    )
+    text = re.sub(r"AIza[A-Za-z0-9_-]{10,}", "<redacted API key>", text)
+    text = re.sub(r"sk-[A-Za-z0-9_]{16,}", "<redacted API key>", text)
+    return text

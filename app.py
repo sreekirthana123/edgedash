@@ -86,6 +86,81 @@ def read_gaps(db_path: str, cutoff: str | None) -> list[dict]:
     return storage.get_gaps_at_cutoff(db_path, cutoff)
 
 
+# One-line system status colors — match the app palette.
+_STATUS_GREEN = "#137333"
+_STATUS_AMBER = "#a15c00"
+_STATUS_RED = "#b42318"
+
+
+def _status_line() -> tuple[str, str]:
+    """Return (color, text) for the one-line status indicator.
+
+    - red:    the last 3 cycle verifications all failed
+    - green:  the last cycle passed within 24 hours
+    - amber:  otherwise (stale data, or no passing cycle on record)
+    """
+    now = datetime.now(timezone.utc)
+
+    def _age_hours(iso_value: str | None) -> float | None:
+        if not iso_value:
+            return None
+        try:
+            timestamp = datetime.fromisoformat(iso_value)
+        except (ValueError, TypeError):
+            return None
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return (now - timestamp).total_seconds() / 3600.0
+
+    try:
+        verifier_rows = [
+            row
+            for row in storage.get_cycle_activity(DB_PATH, limit=50)
+            if (row.get("agent") or "").strip() == "Verifier"
+        ]
+        recent = verifier_rows[:3]
+        if len(recent) == 3 and all(
+            str(row.get("status", "")).lower() == "failed" for row in recent
+        ):
+            return _STATUS_RED, "Unhealthy — last 3 cycles failed verification"
+    except Exception:
+        pass  # a status-line failure must never take the page down
+
+    last_pass = None
+    try:
+        last_pass = storage.get_last_passing_cycle(DB_PATH)
+    except Exception:
+        last_pass = None
+    hours = _age_hours(last_pass.get("timestamp") if last_pass else None)
+    if hours is not None and hours <= 24:
+        return _STATUS_GREEN, f"Live — last cycle passed {hours:.1f}h ago"
+    if hours is not None:
+        return _STATUS_AMBER, f"Stale — last successful cycle {hours:.1f}h ago"
+    return _STATUS_AMBER, "Stale — no successful cycle on record"
+
+
+def render_status_line() -> None:
+    """Render the one-line system status.
+
+    Rule 50: health reporting must never take the page down — any failure
+    here is logged and the line is simply omitted.
+    """
+    try:
+        color, text = _status_line()
+    except Exception as error:
+        LOGGER.error("Status line failed: %s", redact_error(error))
+        return
+    st.markdown(
+        f'<div style="display:flex;align-items:center;gap:.5rem;'
+        f'font-size:.82rem;font-weight:600;color:{color};'
+        f'margin-bottom:.4rem;">'
+        f'<span style="width:.55rem;height:.55rem;border-radius:50%;'
+        f'background:{color};display:inline-block;"></span>'
+        f"{escape(text)}</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def format_timestamp(value: str | None) -> str:
     if not value:
         return "—"
@@ -237,6 +312,7 @@ def main() -> None:
     st.markdown('<div class="eyebrow">EdgeDash / Read-only operations</div>', unsafe_allow_html=True)
     st.title("Agent activity")
     st.markdown('<div class="subtitle">Verified intelligence, with the machinery visible.</div>', unsafe_allow_html=True)
+    render_status_line()
 
     panel_errors = []
     activity = safe_panel_read("activity log", lambda: read_activity(DB_PATH), [], panel_errors)
