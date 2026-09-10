@@ -308,6 +308,42 @@ def render_activity(rows: list[dict]) -> None:
     )
 
 
+def current_verdict(rows: list[dict]) -> str:
+    """Return the most recent Verifier verdict for the "Current verdict" metric.
+
+    The cycle_log has many rows per cycle (one per Scorer sub-task, plus
+    GapAnalyzer, plus Verifier), so the newest row overall is NOT the
+    verification result. We specifically look at the most recent row whose
+    agent is the Verifier, and derive the verdict from its notes
+    ("VERDICT: pass" / "VERDICT: fail") with a fallback to its status column.
+
+    Returns:
+        "pass" / "fail" when a Verifier row exists,
+        "not_run" when no Verifier row exists yet,
+        "no cycles" when the log is empty.
+    """
+    if not rows:
+        return "no cycles"
+    verifier_rows = [
+        row for row in rows if (row.get("agent") or "").strip() == "Verifier"
+    ]
+    if not verifier_rows:
+        return "not_run"
+    latest = verifier_rows[0]  # rows are newest-first from get_cycle_activity
+    notes = str(latest.get("notes") or "")
+    lower_notes = notes.lower()
+    if "verdict: pass" in lower_notes or "verdict: ok" in lower_notes:
+        return "pass"
+    if "verdict: fail" in lower_notes or "verdict: failed" in lower_notes:
+        return "fail"
+    status = str(latest.get("status", "")).lower()
+    if status in {"ok", "pass", "passed"}:
+        return "pass"
+    if status in {"failed", "fail"}:
+        return "fail"
+    return "not_run"
+
+
 def main() -> None:
     st.markdown('<div class="eyebrow">EdgeDash / Read-only operations</div>', unsafe_allow_html=True)
     st.title("Agent activity")
@@ -333,6 +369,7 @@ def main() -> None:
 
     newest = activity[0] if activity else None
     newest_status = str(newest.get("status", "unknown")).lower() if newest else "no cycles"
+    verdict = current_verdict(activity)
     passing_timestamp = passing.get("timestamp") if passing else None
 
     if newest and newest_status in {"failed", "degraded", "suspect"}:
@@ -346,7 +383,7 @@ def main() -> None:
         ("Last successful cycle", format_timestamp(passing_timestamp)),
         ("Total listings", str(counts["total_listings"])),
         ("Total scored", str(counts["total_scored"])),
-        ("Current verdict", newest_status),
+        ("Current verdict", verdict),
     ]
     for column, (label, value) in zip(metric_columns, metrics):
         status_class = "status-fail" if value in {"failed", "degraded", "suspect"} else ""
