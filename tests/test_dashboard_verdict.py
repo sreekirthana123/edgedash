@@ -1,10 +1,10 @@
-"""Tests for the dashboard's current_verdict helper (app.py).
+"""Tests for the dashboard's current_verdict helper (views/dashboard.py).
 
 The "Current verdict" metric must reflect the most recent Verifier row's
 verdict, not whatever row happens to be newest in cycle_log overall.
 """
 
-from app import current_verdict
+from views.dashboard import current_verdict
 
 
 def _row(agent, status="ok", notes=""):
