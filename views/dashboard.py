@@ -44,25 +44,83 @@ def read_last_verifier(db_path: str) -> dict | None:
 
 
 @st.cache_data(ttl=15)
-def read_listings(db_path: str, since: str | None, min_score: int) -> list[dict]:
-    return storage.get_listings(db_path, since=since, min_score=min_score)
+def read_listings(db_path: str, cutoff: str | None) -> list[dict]:
+    return storage.get_listings_at_cutoff(db_path, cutoff)
 
 
 @st.cache_data(ttl=15)
-def read_gaps(db_path: str, since: str | None) -> list[dict]:
-    return storage.get_skill_gaps(db_path, since=since)
+def read_gaps(db_path: str, cutoff: str | None) -> list[dict]:
+    return storage.get_gaps_at_cutoff(db_path, cutoff)
 
 
 @st.cache_data(ttl=15)
-def read_counts(db_path: str) -> dict:
-    return storage.get_counts(db_path)
+def read_counts(db_path: str, cutoff: str | None) -> dict:
+    return storage.get_listing_counts_at_cutoff(db_path, cutoff)
 
 
-@st.cache_data(ttl=15)
-def read_health(db_path: str) -> dict:
-    from edgedash.health import run as run_health
+def safe_panel_read(label: str, reader, default, errors: list[str]):
+    """Read one dashboard panel without allowing its failure to stop the page."""
+    try:
+        return reader()
+    except Exception as error:
+        LOGGER.error("Dashboard panel failed (%s): %s", label, redact_error(error))
+        errors.append(label)
+        return default
 
-    return run_health(db_path, quiet=True)
+
+# One-line system status levels, mapped to the shared pill CSS.
+_STATUS_STYLES = {
+    "green": ("status-pill-ok", "dot-ok", "Live"),
+    "amber": ("status-pill-warn", "dot-warn", "Stale"),
+    "red": ("status-pill-bad", "dot-bad", "Unhealthy"),
+}
+
+
+def _status_line() -> tuple[str, str, str]:
+    """Return (level, title, detail) for the one-line status indicator.
+
+    - red:    the last 3 cycle verifications all failed
+    - green:  the last cycle passed within 24 hours
+    - amber:  otherwise (stale data, or no passing cycle on record)
+    """
+    now = datetime.now(timezone.utc)
+
+    def _age_hours(iso_value):
+        if not iso_value:
+            return None
+        try:
+            timestamp = datetime.fromisoformat(iso_value)
+        except (ValueError, TypeError):
+            return None
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return (now - timestamp).total_seconds() / 3600.0
+
+    try:
+        verifier_rows = [
+            row
+            for row in storage.get_cycle_activity(DB_PATH, limit=50)
+            if (row.get("agent") or "").strip() == "Verifier"
+        ]
+        recent = verifier_rows[:3]
+        if len(recent) == 3 and all(
+            str(row.get("status", "")).lower() == "failed" for row in recent
+        ):
+            return "red", "Unhealthy", "last 3 cycles failed verification"
+    except Exception:
+        pass  # a status-line failure must never take the page down
+
+    last_pass = None
+    try:
+        last_pass = storage.get_last_passing_cycle(DB_PATH)
+    except Exception:
+        last_pass = None
+    hours = _age_hours(last_pass.get("timestamp") if last_pass else None)
+    if hours is not None and hours <= 24:
+        return "green", "Live", f"last cycle passed {hours:.1f}h ago"
+    if hours is not None:
+        return "amber", "Stale", f"last successful cycle {hours:.1f}h ago"
+    return "amber", "Stale", "no successful cycle on record"
 
 
 def format_timestamp(value) -> str:
@@ -178,61 +236,42 @@ def render_activity(activity: list[dict]) -> None:
     st.markdown("".join(html), unsafe_allow_html=True)
 
 
-def render_status_line(health: dict) -> None:
+def render_status_line() -> None:
     """One-line health indicator. Any failure here must never take the page down."""
-    if not health:
-        return
-    overall = health.get("overall", "unknown")
-    checks = health.get("checks", {})
     try:
-        if overall == "healthy":
-            st.markdown(
-                '<div class="status-pill status-pill-ok">'
-                '<span class="dot dot-ok">&#9679;</span> <b>Live</b>'
-                " <span class='pill-muted'>system healthy</span></div>",
-                unsafe_allow_html=True,
-            )
-        elif overall == "degraded":
-            failed = [k for k, v in checks.items() if v.get("status") == "fail"]
-            reason = ", ".join(failed[:2]) if failed else "degraded"
-            st.markdown(
-                f'<div class="status-pill status-pill-warn">'
-                f'<span class="dot dot-warn">&#9679;</span> <b>Degraded</b>'
-                f" <span class='pill-muted'>- {escape(reason)}</span></div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                '<div class="status-pill status-pill-bad">'
-                '<span class="dot dot-bad">&#9679;</span> <b>Unhealthy</b>'
-                " <span class='pill-muted'>checks failing</span></div>",
-                unsafe_allow_html=True,
-            )
+        level, title, detail = _status_line()
+    except Exception as error:
+        LOGGER.error("Status line failed: %s", redact_error(error))
+        return
+    pill, dot, _ = _STATUS_STYLES[level]
+    try:
+        st.markdown(
+            f'<div class="status-pill {pill}">'
+            f'<span class="dot {dot}">&#9679;</span> <b>{escape(title)}</b>'
+            f" <span class='pill-muted'>{escape(detail)}</span></div>",
+            unsafe_allow_html=True,
+        )
     except Exception:
         pass  # rule 50: the indicator must never break the page
 
 
 def main() -> None:
-    activity = read_activity(DB_PATH)
-    passing = read_last_passing(DB_PATH)
-    fallback_verifier = read_last_verifier(DB_PATH)
-    counts = read_counts(DB_PATH)
-    try:
-        health = read_health(DB_PATH)
-    except Exception:
-        health = None  # rule 50: health failure must never break the page
+    panel_errors: list[str] = []
+    activity = safe_panel_read("activity log", lambda: read_activity(DB_PATH), [], panel_errors)
+    passing = safe_panel_read("last passing cycle", lambda: read_last_passing(DB_PATH), None, panel_errors)
+    fallback_verifier = safe_panel_read("last verifier", lambda: read_last_verifier(DB_PATH), None, panel_errors)
 
-    passing_timestamp = passing.get("finished_at") if passing else None
-    listings = read_listings(
-        DB_PATH,
-        since=passing_timestamp,
-        min_score=Config.load("config.yaml").min_fit_score,
-    )
-    gaps = read_gaps(DB_PATH, since=passing_timestamp)
+    # The passing-cycle row's cutoff key is "timestamp" (not "finished_at").
+    passing_timestamp = passing.get("timestamp") if passing else None
+    counts = safe_panel_read("listing counts", lambda: read_counts(DB_PATH, passing_timestamp), {"total_listings": 0, "total_scored": 0}, panel_errors)
+    listings = safe_panel_read("scored listings", lambda: read_listings(DB_PATH, passing_timestamp), [], panel_errors)
+    gaps = safe_panel_read("skill gaps", lambda: read_gaps(DB_PATH, passing_timestamp), [], panel_errors)
 
     verdict = current_verdict(activity, fallback_verifier)
+    newest = activity[0] if activity else None
+    newest_status = str(newest.get("status", "unknown")).lower() if newest else "no cycles"
 
-    render_status_line(health)
+    render_status_line()
 
     st.markdown('<span class="eyebrow">EdgeDash</span>', unsafe_allow_html=True)
     st.markdown("# Dashboard")
@@ -243,35 +282,28 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    col1, col2, col3, col4, col5 = st.columns(5)
-    with col1:
-        st.markdown(
-            '<div class="metric"><div class="metric-label">Current verdict</div>'
-            f'<div class="metric-value status-{verdict}">{verdict}</div></div>',
-            unsafe_allow_html=True,
+    if newest_status in {"failed", "degraded", "suspect"}:
+        st.warning(
+            "Newest cycle is not verified. The data below is from the earlier "
+            f"verified cycle at {format_timestamp(passing_timestamp)}."
         )
-    with col2:
-        st.markdown(
-            '<div class="metric"><div class="metric-label">Last success</div>'
-            f'<div class="metric-value">{format_timestamp(passing_timestamp)}</div></div>',
-            unsafe_allow_html=True,
+    if panel_errors:
+        st.caption(
+            "Some panels could not be loaded: " + ", ".join(panel_errors)
         )
-    with col3:
-        st.markdown(
-            '<div class="metric"><div class="metric-label">Listings</div>'
-            f'<div class="metric-value">{counts.get("total_listings", 0)}</div></div>',
-            unsafe_allow_html=True,
-        )
-    with col4:
-        st.markdown(
-            '<div class="metric"><div class="metric-label">Scored</div>'
-            f'<div class="metric-value">{counts.get("scored_listings", 0)}</div></div>',
-            unsafe_allow_html=True,
-        )
-    with col5:
-        st.markdown(
-            '<div class="metric"><div class="metric-label">Skill gaps</div>'
-            f'<div class="metric-value">{counts.get("skill_gaps", 0)}</div></div>',
+
+    col1, col2, col3, col4 = st.columns(4)
+    metrics = [
+        ("Current verdict", verdict, f"status-{verdict}"),
+        ("Last success", format_timestamp(passing_timestamp), ""),
+        ("Listings", str(counts.get("total_listings", 0)), ""),
+        ("Scored", str(counts.get("total_scored", 0)), ""),
+    ]
+    for column, (label, value, value_class) in zip((col1, col2, col3, col4), metrics):
+        column.markdown(
+            '<div class="metric"><div class="metric-label">'
+            f"{label}</div>"
+            f'<div class="metric-value {value_class}">{value}</div></div>',
             unsafe_allow_html=True,
         )
 
@@ -283,17 +315,13 @@ def main() -> None:
 
     config = Config.load("config.yaml")
     daily_cap = config.daily_query_cap
-    now = datetime.now(timezone.utc)
-    window_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    if now.hour < 6:
-        window_start -= timedelta(days=1)
-    daily_count = storage.count_queries_since(DB_PATH, window_start)
+    daily_count = storage.count_queries_today(DB_PATH)
     daily_cap_reached = daily_count >= daily_cap
 
     if daily_cap_reached:
         st.warning(
             f"Daily question cap reached ({daily_count}/{daily_cap}). "
-            "Try again after midnight UTC."
+            "Try again tomorrow."
         )
 
     example_questions = [
