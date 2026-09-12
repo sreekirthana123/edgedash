@@ -20,6 +20,26 @@ def test_no_verifier_row_returns_not_run():
     assert current_verdict(rows) == "not_run"
 
 
+def test_no_verifier_row_but_fallback_pass_returns_pass():
+    """Fallback: recent slice has no Verifier, but an earlier pass exists."""
+    rows = [_row("Scorer[abc123]", status="ok", notes="Score: 42")]
+    fallback = _row("Verifier", status="ok", notes="VERDICT: pass")
+    assert current_verdict(rows, fallback) == "pass"
+
+
+def test_no_verifier_row_but_fallback_fail_returns_fail():
+    rows = [_row("Scorer[quota]", status="failed", notes="API quota exhausted")]
+    fallback = _row("Verifier", status="failed", notes="VERDICT: fail — score_spread")
+    assert current_verdict(rows, fallback) == "fail"
+
+
+def test_recent_verifier_takes_precedence_over_fallback():
+    """A recent Verifier row wins over an older fallback."""
+    rows = [_row("Verifier", status="ok", notes="VERDICT: fail — freshness observed")]
+    fallback = _row("Verifier", status="ok", notes="VERDICT: pass")
+    assert current_verdict(rows, fallback) == "fail"
+
+
 def test_verdict_from_notes_pass():
     rows = [
         _row("Scorer[abc123]", status="ok", notes="Score: 42"),
@@ -62,3 +82,9 @@ def test_verdict_ignores_newest_non_verifier_row():
 def test_verdict_unknown_status_returns_not_run():
     rows = [_row("Verifier", status="suspect", notes="")]
     assert current_verdict(rows) == "not_run"
+
+
+def test_empty_log_returns_no_cycles_even_with_fallback():
+    """A genuinely empty log still reads 'no cycles' regardless of fallback."""
+    fallback = _row("Verifier", status="ok", notes="VERDICT: pass")
+    assert current_verdict([], fallback) == "no cycles"

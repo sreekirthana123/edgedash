@@ -8,6 +8,8 @@ import sqlite3
 
 import pytest
 
+from datetime import datetime, timezone
+
 from edgedash import storage
 
 
@@ -106,3 +108,25 @@ def test_init_db_adds_verified_at_column_to_existing_table(db_path):
         }
     assert "verified_at" in columns
     assert storage.count_unverified(db_path) == 0
+
+
+def test_get_last_verifier_row_none_when_never_run(db_path):
+    assert storage.get_last_verifier_row(db_path) is None
+
+
+def test_get_last_verifier_row_returns_newest_verifier(db_path):
+    now = datetime.now(timezone.utc)
+    storage.log_cycle(db_path, agent="Scorer[abc]", started_at=now.isoformat(),
+                      finished_at=now.isoformat(), records_touched=1, status="ok",
+                      notes="Score: 42")
+    storage.log_cycle(db_path, agent="Verifier", started_at=now.isoformat(),
+                      finished_at=now.isoformat(), records_touched=0, status="ok",
+                      notes="VERDICT: pass")
+    storage.log_cycle(db_path, agent="Verifier", started_at=now.isoformat(),
+                      finished_at=now.isoformat(), records_touched=0, status="ok",
+                      notes="VERDICT: fail — score_spread observed 4.0")
+
+    row = storage.get_last_verifier_row(db_path)
+    assert row is not None
+    assert row["agent"] == "Verifier"
+    assert "VERDICT: fail" in row["notes"]

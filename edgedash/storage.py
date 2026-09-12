@@ -831,6 +831,27 @@ def get_last_passing_cycle(db_path: str) -> Optional[dict]:
         return dict(row) if row else None
 
 
+def get_last_verifier_row(db_path: str) -> Optional[dict]:
+    """Read the most recent Verifier cycle-log row, or None if never run.
+
+    Used by the dashboard's "Current verdict" metric so it can fall back to
+    the last real verification result when the most recent cycle did not
+    actually run the Verifier (e.g. nothing new to verify).
+    """
+    with get_conn(db_path) as conn:
+        cursor = conn.execute(
+            """
+            SELECT agent, status, notes, started_at, finished_at
+            FROM cycle_log
+            WHERE agent = 'Verifier'
+            ORDER BY started_at DESC, id DESC
+            LIMIT 1
+            """
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
 def get_listings_at_cutoff(db_path: str, cutoff: Optional[str]) -> list[dict]:
     """Read scored listings available at the last passing cutoff."""
     with get_conn(db_path) as conn:

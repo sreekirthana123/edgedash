@@ -72,6 +72,11 @@ def read_last_passing(db_path: str) -> dict | None:
 
 
 @st.cache_data(ttl=15)
+def read_last_verifier(db_path: str) -> dict | None:
+    return storage.get_last_verifier_row(db_path)
+
+
+@st.cache_data(ttl=15)
 def read_counts(db_path: str, cutoff: str | None) -> dict:
     return storage.get_listing_counts_at_cutoff(db_path, cutoff)
 
@@ -308,7 +313,7 @@ def render_activity(rows: list[dict]) -> None:
     )
 
 
-def current_verdict(rows: list[dict]) -> str:
+def current_verdict(rows: list[dict], fallback: dict | None = None) -> str:
     """Return the most recent Verifier verdict for the "Current verdict" metric.
 
     The cycle_log has many rows per cycle (one per Scorer sub-task, plus
@@ -317,9 +322,14 @@ def current_verdict(rows: list[dict]) -> str:
     agent is the Verifier, and derive the verdict from its notes
     ("VERDICT: pass" / "VERDICT: fail") with a fallback to its status column.
 
+    When the recent activity slice has no Verifier row (the latest cycle
+    skipped verification because there was nothing new to verify), we fall
+    back to the last real Verifier row from the full cycle_log so the metric
+    keeps showing the last known verdict instead of flipping to "not_run".
+
     Returns:
-        "pass" / "fail" when a Verifier row exists,
-        "not_run" when no Verifier row exists yet,
+        "pass" / "fail" when a Verifier row exists (recent or fallback),
+        "not_run" only when no Verifier row has EVER existed in history,
         "no cycles" when the log is empty.
     """
     if not rows:
@@ -327,9 +337,9 @@ def current_verdict(rows: list[dict]) -> str:
     verifier_rows = [
         row for row in rows if (row.get("agent") or "").strip() == "Verifier"
     ]
-    if not verifier_rows:
+    latest = verifier_rows[0] if verifier_rows else fallback
+    if latest is None:
         return "not_run"
-    latest = verifier_rows[0]  # rows are newest-first from get_cycle_activity
     notes = str(latest.get("notes") or "")
     lower_notes = notes.lower()
     if "verdict: pass" in lower_notes or "verdict: ok" in lower_notes:
@@ -369,7 +379,7 @@ def main() -> None:
 
     newest = activity[0] if activity else None
     newest_status = str(newest.get("status", "unknown")).lower() if newest else "no cycles"
-    verdict = current_verdict(activity)
+    verdict = current_verdict(activity, read_last_verifier(DB_PATH))
     passing_timestamp = passing.get("timestamp") if passing else None
 
     if newest and newest_status in {"failed", "degraded", "suspect"}:
