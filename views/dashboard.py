@@ -374,8 +374,8 @@ def main() -> None:
 
     left, right = st.columns(2, gap="large")
     with left:
-        st.markdown("## Top 10 scored listings")
-        st.caption("From last passing cycle - min score 50")
+        st.markdown("## Best-fit jobs for you")
+        st.caption("Ranked by how well each listing matches your skills - higher score means a better fit.")
         if listings:
             for listing in listings:
                 score = listing.get("fit_score", "-")
@@ -390,8 +390,8 @@ def main() -> None:
         else:
             st.info("No verified scored listings yet")
     with right:
-        st.markdown("## Top 10 skill gaps")
-        st.caption("From last passing cycle")
+        st.markdown("## Skills worth learning next")
+        st.caption("Skills that appear most often in listings you'd otherwise fit - ranked by how many good opportunities each gap blocks.")
         if gaps:
             for index, gap in enumerate(gaps, start=1):
                 skill = gap.get("skill", "-")
