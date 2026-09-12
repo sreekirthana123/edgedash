@@ -99,6 +99,13 @@ CSS_HOME = CSS + """
 
 
 def apply_style(home: bool = False) -> None:
-    """Inject the shared CSS into the current page."""
+    """Inject the shared CSS into the current page.
+
+    The CSS must be wrapped in <style> tags: unsafe_allow_html=True only
+    permits HTML through st.markdown — bare CSS text would render as
+    visible literal text on the page.
+    """
     import streamlit as st
-    st.markdown(CSS_HOME if home else CSS, unsafe_allow_html=True)
+
+    css = CSS_HOME if home else CSS
+    st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
