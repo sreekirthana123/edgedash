@@ -88,3 +88,30 @@ def test_empty_log_returns_no_cycles_even_with_fallback():
     """A genuinely empty log still reads 'no cycles' regardless of fallback."""
     fallback = _row("Verifier", status="ok", notes="VERDICT: pass")
     assert current_verdict([], fallback) == "no cycles"
+
+
+# --- suspect-row summariser -------------------------------------------------
+
+from views.dashboard import _summarize_suspect  # noqa: E402
+
+
+def test_suspect_distribution_stats_get_human_summary():
+    notes = "Distribution: count=8 min=35 max=42 mean=37 spread=7"
+    summary = _summarize_suspect(notes)
+    assert "Distribution:" not in summary
+    assert "count=" not in summary
+    assert "unusually similar" in summary
+    assert "8 listings scored" in summary
+    assert "7-point range" in summary
+
+
+def test_suspect_without_parseable_stats_gets_generic_summary():
+    summary = _summarize_suspect("something odd happened")
+    assert "worth a second look" in summary
+    assert "count=" not in summary
+
+
+def test_suspect_extraction_notes_get_human_summary():
+    summary = _summarize_suspect("Extraction pattern unusual: 40% empty")
+    assert "extracted listing data" in summary
+    assert "worth a second look" in summary

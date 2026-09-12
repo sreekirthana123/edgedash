@@ -191,6 +191,31 @@ def _summarize_error(notes: str) -> str:
     return notes
 
 
+def _summarize_suspect(notes: str) -> str:
+    """Plain-English one-liner for a 'suspect' cycle row.
+
+    Suspect rows carry verifier statistics (e.g. "Distribution: count=8
+    min=35 max=42 mean=37 spread=7") rather than an error message, so the
+    error summariser would just echo the raw numbers. Translate the common
+    stat lines into something a visitor can read at a glance; the raw stats
+    stay available in the row's expandable detail.
+    """
+    lowered = notes.lower()
+    if "distribution" in lowered or "spread" in lowered:
+        count_match = re.search(r"count=(\d+)", lowered)
+        spread_match = re.search(r"spread=([\d.]+)", lowered)
+        parts = []
+        if count_match:
+            parts.append(f"{count_match.group(1)} listings scored")
+        if spread_match:
+            parts.append(f"scores within a {spread_match.group(1)}-point range")
+        observed = f" ({', '.join(parts)})" if parts else ""
+        return f"Scores look unusually similar{observed} - worth a second look"
+    if "extraction" in lowered:
+        return "Some extracted listing data looks unusual - worth a second look"
+    return "Unusual data pattern detected - worth a second look"
+
+
 def render_activity(activity: list[dict]) -> None:
     if not activity:
         st.info("No activity recorded yet.")
@@ -213,7 +238,10 @@ def render_activity(activity: list[dict]) -> None:
         elif status == "suspect":
             css_class = "activity-suspect"
         if status in ("failed", "fail", "suspect") and notes:
-            summary = _summarize_error(notes)
+            summary = (
+                _summarize_suspect(notes) if status == "suspect"
+                else _summarize_error(notes)
+            )
             detail = escape(notes)
             cell = (
                 f'<span class="status-{status}">{escape(status)}</span><br>'
@@ -223,13 +251,17 @@ def render_activity(activity: list[dict]) -> None:
             )
         else:
             cell = f'<span class="status-{status}">{escape(status)}</span>'
+        # Detail column: suspect rows show the human-readable line (their raw
+        # stats remain in the expandable detail above); other rows keep the
+        # raw notes excerpt.
+        shown = summary if status == "suspect" and notes else notes[:200]
         html.append(
             f'<tr class="{css_class}">'
             f"<td>{agent}</td>"
             f"<td>{started}</td>"
             f"<td>{records}</td>"
             f"<td>{cell}</td>"
-            f"<td>{escape(notes[:200])}</td>"
+            f"<td>{escape(shown)}</td>"
             f"</tr>"
         )
     html.append("</tbody></table></div>")
