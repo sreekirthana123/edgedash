@@ -379,10 +379,16 @@ def main() -> None:
     st.markdown('<span class="eyebrow">EdgeDash</span>', unsafe_allow_html=True)
     st.markdown("# Dashboard")
     st.markdown(
-        '<p class="subtitle">Real-time view of the autonomous job-market '
-        "intelligence pipeline. All data is read-only - the dashboard never "
-        "triggers a cycle.</p>",
+        '<p class="subtitle">All listing and scoring data is read-only, sourced '
+        "from the scheduled pipeline - the dashboard itself never runs a fetch "
+        "or scoring cycle. Uploading a resume makes one live API call to "
+        "personalize your rankings.</p>",
         unsafe_allow_html=True,
+    )
+    st.caption(
+        "About this data: listings are sourced from the "
+        "[Arbeitnow job board API](https://arbeitnow.com) and fetched daily "
+        "by the scheduled pipeline."
     )
 
     if newest_status in {"failed", "degraded", "suspect"}:
@@ -421,8 +427,13 @@ def main() -> None:
 
     st.markdown("## Ask your data")
     st.caption(
-        "Ask questions about the scored listings and skill gaps. "
-        "Each question uses 2 Gemini API calls."
+        "Each question uses 2 Gemini API calls and is answered from the "
+        "scheduled pipeline's verified dataset"
+        + (
+            " (configured skills - not your uploaded resume)."
+            if st.session_state.get("resume_profile") is not None
+            else "."
+        )
     )
 
     daily_cap = config.daily_query_cap
