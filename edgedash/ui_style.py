@@ -30,7 +30,7 @@ CSS = """
 h1 { color: var(--ink); font-size: 2.4rem; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 0.4rem; line-height: 1.15; }
 h2 { color: var(--ink); font-size: 1.25rem; font-weight: 600; letter-spacing: -0.01em; margin: 2.2rem 0 0.8rem; }
 h3 { color: var(--ink); font-size: 1.05rem; font-weight: 600; margin: 1.6rem 0 0.5rem; }
-.subtitle { color: var(--muted); font-size: 1.05rem; line-height: 1.65; margin-bottom: 1.8rem; max-width: 760px; }
+.subtitle { color: var(--muted); font-size: 1.75rem; line-height: 1.55; margin-bottom: 1.8rem; max-width: 900px; }
 .eyebrow { color: var(--teal); font-size: 0.72rem; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase; }
 .lead { color: var(--ink); font-size: 1.1rem; line-height: 1.7; margin-bottom: 1.2rem; }
 

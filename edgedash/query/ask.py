@@ -39,6 +39,14 @@ def _cannot_answer() -> str:
     )
 
 
+def _no_resume_text() -> str:
+    return (
+        "No resume is loaded, so there is nothing to rank roles against yet. "
+        "Upload your resume (PDF, JPEG or PNG) at the top of this page and "
+        "click 'Analyze resume' first, then ask again."
+    )
+
+
 def _clean_question(question: Any) -> str:
     if not isinstance(question, str):
         return ""
@@ -162,8 +170,14 @@ def _clamp_params(tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
 def ask(
     question: str,
     session_timestamps: list[float] | None = None,
+    resume_profile: dict[str, Any] | None = None,
 ) -> Answer:
-    """Route one question, execute its fixed tool, and phrase its rows."""
+    """Route one question, execute its fixed tool, and phrase its rows.
+
+    resume_profile is the dashboard's session resume profile (skills +
+    seniority). It is injected server-side into needs_profile tools and is
+    never part of the model-facing route parameters.
+    """
     started = time.perf_counter()
     config = Config.load()
     storage.init_db(config.db_path)
@@ -252,7 +266,21 @@ def ask(
 
     params = _clamp_params(tool_name, params)
     tool_function = TOOLS[tool_name]["function"]
-    result = tool_function(**params, db_path=config.db_path)
+    if TOOLS[tool_name].get("needs_profile"):
+        if not resume_profile:
+            return _rejection(
+                question,
+                config,
+                started,
+                "rejected: no resume loaded",
+                _no_resume_text(),
+            )
+        # Injected server-side, never model-supplied (see tool() docstring).
+        result = tool_function(
+            **params, db_path=config.db_path, profile=resume_profile, config=config
+        )
+    else:
+        result = tool_function(**params, db_path=config.db_path)
     rows = result["rows"]
     summary = result["summary"]
     try:

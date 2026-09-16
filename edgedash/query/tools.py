@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Any, Callable
 
+from edgedash import resume
 from edgedash import storage
 from edgedash.agents.extractor import _hash_description
 from edgedash.skills import canonical
@@ -16,14 +17,22 @@ def tool(
     name: str,
     description: str,
     parameters: dict[str, Any],
+    needs_profile: bool = False,
 ) -> Callable:
-    """Register a deterministic query function and its router metadata."""
+    """Register a deterministic query function and its router metadata.
+
+    needs_profile marks a tool that receives the dashboard's session resume
+    profile (and the loaded Config) injected by ask() at call time. These are
+    NEVER part of the router-facing parameters, so the model cannot supply
+    or forge them — it can only choose the tool.
+    """
     def decorator(function: Callable) -> Callable:
         TOOLS[name] = {
             "name": name,
             "description": description,
             "parameters": parameters,
             "function": function,
+            "needs_profile": needs_profile,
         }
         return wraps(function)(function)
 
@@ -198,8 +207,40 @@ def skill_demand(skill: str, *, db_path: str = "edgedash.db") -> dict[str, Any]:
     return {"rows": rows, "summary": f"Demand for '{normalized}' in required versus nice-to-have skills."}
 
 
+@tool(
+    "best_fit_resume",
+    "Use when the user asks for the best-fit, recommended, or matched roles for "
+    "THEIR OWN resume or uploaded CV (e.g. 'best-fit roles for my resume'). "
+    "Requires a resume to be loaded on the dashboard. Ranks scored listings "
+    "against the resume's skills and seniority with the deterministic scoring "
+    "formula over already-cached extraction facts.",
+    {"type": "object", "properties": {"n": {"type": "integer", "minimum": 1, "maximum": 25, "default": 10}}, "additionalProperties": False},
+    needs_profile=True,
+)
+def best_fit_resume(
+    n: int = 10,
+    *,
+    db_path: str = "edgedash.db",
+    profile: dict | None = None,
+    config=None,
+) -> dict[str, Any]:
+    """Rank scored listings against the session resume profile (no LLM calls)."""
+    n = _clamp_int(n, 1, 25, 10)
+    listings, _gaps = resume.recompute_panels(db_path, config, profile or {})
+    rows = listings[:n]
+    skills = ", ".join((profile or {}).get("skills", [])[:8]) or "no skills extracted"
+    return {
+        "rows": rows,
+        "summary": (
+            f"Top {len(rows)} best-fit listings for the uploaded resume "
+            f"(skills: {skills}). Scores come from the deterministic formula "
+            "applied to the resume's skills, not the stored configured skills."
+        ),
+    }
+
+
 __all__ = [
     "TOOLS", "tool", "companies_hiring", "seniority_distribution",
     "best_matches", "top_gaps", "gap_detail", "trend", "listing_count",
-    "skill_demand",
+    "skill_demand", "best_fit_resume",
 ]

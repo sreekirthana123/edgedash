@@ -385,10 +385,12 @@ def main() -> None:
         "personalize your rankings.</p>",
         unsafe_allow_html=True,
     )
-    st.caption(
-        "About this data: listings are sourced from the "
-        "[Arbeitnow job board API](https://arbeitnow.com) and fetched daily "
-        "by the scheduled pipeline."
+    st.markdown("## Data Source")
+    st.markdown(
+        "Listings are sourced from the "
+        "[Arbeitnow job board API](https://arbeitnow.com), fetched daily by "
+        "the scheduled pipeline and scored deterministically. The dashboard "
+        "never modifies the pipeline's data."
     )
 
     if newest_status in {"failed", "degraded", "suspect"}:
@@ -428,11 +430,12 @@ def main() -> None:
     st.markdown("## Ask your data")
     st.caption(
         "Each question uses 2 Gemini API calls and is answered from the "
-        "scheduled pipeline's verified dataset"
+        "scheduled pipeline's verified dataset. "
         + (
-            " (configured skills - not your uploaded resume)."
+            "'Best-fit roles' questions are ranked against your uploaded "
+            "resume; all other answers reflect the configured skills."
             if st.session_state.get("resume_profile") is not None
-            else "."
+            else "All answers reflect the configured target skills."
         )
     )
 
@@ -446,11 +449,18 @@ def main() -> None:
             "Try again tomorrow."
         )
 
-    example_questions = [
-        "Which companies are hiring this week?",
-        "What are the top skill gaps?",
-        "How many listings are scored?",
-    ]
+    if st.session_state.get("resume_profile") is not None:
+        example_questions = [
+            "Find the best-fit roles from my resume",
+            "Which companies are hiring this week?",
+            "What are the top skill gaps?",
+        ]
+    else:
+        example_questions = [
+            "Which companies are hiring this week?",
+            "What are the top skill gaps?",
+            "How many listings are scored?",
+        ]
     example_columns = st.columns(3)
     for column, example in zip(example_columns, example_questions):
         if column.button(
@@ -477,7 +487,11 @@ def main() -> None:
     ):
         try:
             session_timestamps = st.session_state.setdefault("query_timestamps", [])
-            answer = ask(question_to_ask.strip(), session_timestamps)
+            answer = ask(
+                question_to_ask.strip(),
+                session_timestamps,
+                resume_profile=st.session_state.get("resume_profile"),
+            )
             st.markdown(answer.text)
             st.markdown("**Underlying rows**")
             st.dataframe(answer.rows, use_container_width=True, hide_index=True)
