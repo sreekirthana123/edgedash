@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import streamlit as st
 
 from edgedash import storage
+from edgedash import resume as resume_module
 from edgedash.config import Config
 from edgedash.query.ask import ask
 from edgedash.runtime import get_runtime_value, redact_error
@@ -287,8 +288,66 @@ def render_status_line() -> None:
         pass  # rule 50: the indicator must never break the page
 
 
+def _render_resume_section(config) -> dict | None:
+    """Render the optional resume uploader and return the active profile.
+
+    The extracted profile ({skills, seniority}) lives ONLY in
+    st.session_state — the file and the extracted data are never written to
+    the database or disk, and disappear when the session ends.
+
+    Returns the parsed profile dict when a resume is active, else None.
+    """
+    uploaded = st.file_uploader(
+        "Upload your resume (PDF, JPEG or PNG) to personalize the rankings",
+        type=["pdf", "jpg", "jpeg", "png"],
+        key="resume_upload",
+    )
+
+    profile = st.session_state.get("resume_profile")
+    if uploaded is None:
+        # A file was removed (or none uploaded) — drop any stale profile.
+        st.session_state.pop("resume_profile", None)
+        st.session_state.pop("resume_key", None)
+        st.caption("Matching against configured skills")
+        return None
+
+    # Parse only when the file actually changes — each parse costs exactly
+    # one Gemini call, so identical re-uploads must not re-bill.
+    file_key = f"{uploaded.name}:{uploaded.size}"
+    if st.session_state.get("resume_key") != file_key or profile is None:
+        try:
+            with st.spinner("Reading your resume (one Gemini call)..."):
+                profile = resume_module.parse_resume(
+                    uploaded.getvalue(), uploaded.type, config
+                )
+        except ValueError as error:
+            st.session_state.pop("resume_profile", None)
+            st.session_state.pop("resume_key", None)
+            st.error(f"Could not read that resume: {error}")
+            st.caption("Matching against configured skills")
+            return None
+        except Exception as error:
+            LOGGER.error("Resume parse failed: %s", redact_error(error))
+            st.session_state.pop("resume_profile", None)
+            st.session_state.pop("resume_key", None)
+            st.error("Could not analyze that resume right now. Please try again later.")
+            st.caption("Matching against configured skills")
+            return None
+        st.session_state["resume_profile"] = profile
+        st.session_state["resume_key"] = file_key
+
+    skill_count = len(profile.get("skills", []))
+    st.success(
+        f"Matching against your resume: uploaded, showing personalized results "
+        f"({skill_count} skills, {profile.get('seniority', 'unknown')} level). "
+        f"Clear the uploader to return to the configured skills."
+    )
+    return profile
+
+
 def main() -> None:
     panel_errors: list[str] = []
+    config = Config.load("config.yaml")
     activity = safe_panel_read("activity log", lambda: read_activity(DB_PATH), [], panel_errors)
     passing = safe_panel_read("last passing cycle", lambda: read_last_passing(DB_PATH), None, panel_errors)
     fallback_verifier = safe_panel_read("last verifier", lambda: read_last_verifier(DB_PATH), None, panel_errors)
@@ -339,13 +398,21 @@ def main() -> None:
             unsafe_allow_html=True,
         )
 
+    # Optional resume personalization. Session-only: nothing from the upload
+    # is persisted anywhere (rule: no resume writes to Postgres or disk).
+    resume_profile = None
+    try:
+        resume_profile = _render_resume_section(config)
+    except Exception as error:
+        LOGGER.error("Resume section failed: %s", redact_error(error))
+        st.caption("Matching against configured skills")
+
     st.markdown("## Ask your data")
     st.caption(
         "Ask questions about the scored listings and skill gaps. "
         "Each question uses 2 Gemini API calls."
     )
 
-    config = Config.load("config.yaml")
     daily_cap = config.daily_query_cap
     daily_count = storage.count_queries_today(DB_PATH)
     daily_cap_reached = daily_count >= daily_cap
@@ -405,9 +472,31 @@ def main() -> None:
     render_activity(activity)
 
     left, right = st.columns(2, gap="large")
+    resume_listings, resume_gaps = None, None
+    if resume_profile:
+        # Personalized: recompute both panels against the resume using the
+        # existing deterministic scoring formula over cached extraction facts.
+        try:
+            resume_listings, resume_gaps = resume_module.recompute_panels(
+                DB_PATH, config, resume_profile
+            )
+        except Exception as error:
+            LOGGER.error("Resume recompute failed: %s", redact_error(error))
+            resume_listings, resume_gaps = None, None
+        if resume_listings is not None:
+            listings, gaps = resume_listings, resume_gaps
+
     with left:
-        st.markdown("## Best-fit jobs for you")
-        st.caption("Ranked by how well each listing matches your skills - higher score means a better fit.")
+        if resume_profile and resume_listings is not None:
+            st.markdown("## Best-fit jobs for you — matched against your uploaded resume")
+            st.caption(
+                "Re-scored live against the skills in your resume — higher score means a better fit."
+            )
+        else:
+            st.markdown("## Best-fit jobs — matched against the configured target skills")
+            st.caption(
+                "Ranked by fit score against the configured skills, not personalized — upload a resume to personalize."
+            )
         if listings:
             for listing in listings:
                 score = listing.get("fit_score", "-")
@@ -422,8 +511,16 @@ def main() -> None:
         else:
             st.info("No verified scored listings yet")
     with right:
-        st.markdown("## Skills worth learning next")
-        st.caption("Skills that appear most often in listings you'd otherwise fit - ranked by how many good opportunities each gap blocks.")
+        if resume_profile and resume_gaps is not None:
+            st.markdown("## Skills worth learning next — based on your resume")
+            st.caption(
+                "Skills in listings you'd otherwise fit that your resume doesn't list — ranked by opportunities blocked."
+            )
+        else:
+            st.markdown("## Skills worth learning next — for the configured skills")
+            st.caption(
+                "Skills that appear most often in listings you'd otherwise fit - ranked by how many good opportunities each gap blocks."
+            )
         if gaps:
             for index, gap in enumerate(gaps, start=1):
                 skill = gap.get("skill", "-")

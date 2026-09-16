@@ -69,10 +69,19 @@ def _validate_schema(data: dict, schema: dict) -> None:
             raise ValueError(f"Key '{key}' must be a string or null")
         if expected_type == "object" and not isinstance(data[key], dict):
             raise ValueError(f"Key '{key}' must be an object")
+        if expected_type == "list" and not isinstance(data[key], list):
+            raise ValueError(f"Key '{key}' must be a list")
 
 
 class GeminiProvider:
-    def execute(self, prompt: str, model_name: str, timeout: int = 30) -> str:
+    def execute(
+        self,
+        prompt: str,
+        model_name: str,
+        timeout: int = 30,
+        image_bytes: bytes | None = None,
+        image_mime: str | None = None,
+    ) -> str:
         # Automatically pulled from your saved .env variables
         api_key = get_runtime_value("GEMINI_API_KEY")
         if not api_key:
@@ -84,9 +93,17 @@ class GeminiProvider:
         def _call_gemini():
             # Instructor approach: Instantiate modern Client object
             client = genai.Client(api_key=api_key)
+            if image_bytes is not None:
+                # Multimodal call: text prompt + one image part (vision).
+                contents = [
+                    prompt,
+                    types.Part.from_bytes(data=image_bytes, mime_type=image_mime or "image/png"),
+                ]
+            else:
+                contents = prompt
             response = client.models.generate_content(
                 model=model_name,
-                contents=prompt,
+                contents=contents,
                 config=types.GenerateContentConfig(response_mime_type="application/json"),
             )
             return response.text
@@ -115,6 +132,39 @@ def complete_json(prompt: str, schema: dict, config: Any, timeout: int = 30) -> 
     _limiter.wait_if_needed()
     
     raw_text = provider_instance.execute(prompt, model_name, timeout=timeout)
+    clean_text = _strip_markdown_fences(raw_text)
+    parsed_data = json.loads(clean_text)
+    _validate_schema(parsed_data, schema)
+    return parsed_data
+
+
+def complete_json_image(
+    prompt: str,
+    schema: dict,
+    config: Any,
+    image_bytes: bytes,
+    image_mime: str,
+    timeout: int = 60,
+) -> dict:
+    """One multimodal (vision) Gemini call returning validated JSON.
+
+    Mirrors complete_json() exactly, but sends the prompt plus a single image
+    part. Used by the optional resume-upload feature; the pipeline never calls
+    this. Shares the same rate limiter and provider resolution.
+    """
+    provider_name = getattr(config, "llm_provider", "gemini").lower()
+    model_name = getattr(config, "llm_model", "gemini-3.6-flash")
+
+    provider_instance = _PROVIDERS[provider_name]()
+    _limiter.wait_if_needed()
+
+    raw_text = provider_instance.execute(
+        prompt,
+        model_name,
+        timeout=timeout,
+        image_bytes=image_bytes,
+        image_mime=image_mime,
+    )
     clean_text = _strip_markdown_fences(raw_text)
     parsed_data = json.loads(clean_text)
     _validate_schema(parsed_data, schema)
