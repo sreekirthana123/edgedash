@@ -4,10 +4,12 @@ Scope: parsing normalization, one-Gemini-call guarantee, and the session-only
 panel recompute over extraction_cache. No network access — the LLM is mocked.
 """
 
+import contextlib
 import dataclasses
 
 import pytest
 
+import views.dashboard as dashboard
 from edgedash import resume, storage
 from edgedash.agents.extractor import _hash_description
 from edgedash.config import Config
@@ -217,4 +219,121 @@ def test_recompute_panels_empty_database_returns_empty(db_path, config):
     )
     assert listings == []
     assert gaps == []
+
+
+# ---------- dashboard upload flow: explicit "Analyze resume" button ----------
+
+
+class _Rerun(Exception):
+    """Sentinel mirroring Streamlit's RerunException."""
+
+
+class _FakeUpload:
+    def __init__(self, name="report.pdf", size=1234, data=b"data",
+                 type="application/pdf"):
+        self.name = name
+        self.size = size
+        self.type = type
+        self._data = data
+
+    def getvalue(self):
+        return self._data
+
+
+class _FakeSt:
+    """Minimal stand-in for the streamlit calls used by the resume section."""
+
+    def __init__(self, uploaded, button_return):
+        self.session_state = {}
+        self.uploaded = uploaded
+        self.button_return = button_return
+        self.captions = []
+        self.errors = []
+        self.successes = []
+        self.rerun_called = False
+
+    def file_uploader(self, *args, **kwargs):
+        return self.uploaded
+
+    def button(self, *args, **kwargs):
+        return self.button_return
+
+    def caption(self, text=""):
+        self.captions.append(text)
+
+    def success(self, text):
+        self.successes.append(text)
+
+    def error(self, text):
+        self.errors.append(text)
+
+    def spinner(self, *args, **kwargs):
+        return contextlib.nullcontext()
+
+    def rerun(self):
+        self.rerun_called = True
+        raise _Rerun()
+
+
+def _patch_dashboard_st(monkeypatch, fake):
+    import streamlit as st_module
+
+    mapping = {
+        "file_uploader": fake.file_uploader,
+        "button": fake.button,
+        "caption": fake.caption,
+        "success": fake.success,
+        "error": fake.error,
+        "spinner": fake.spinner,
+        "rerun": fake.rerun,
+        "session_state": fake.session_state,
+    }
+    for name, value in mapping.items():
+        monkeypatch.setattr(st_module, name, value)
+
+
+def test_upload_without_button_click_makes_zero_llm_calls(monkeypatch, config):
+    calls = []
+
+    def fake_complete_json(*args, **kwargs):
+        calls.append(1)
+        return {"skills": ["python"], "seniority": "mid"}
+
+    monkeypatch.setattr("edgedash.llm.complete_json", fake_complete_json)
+    fake = _FakeSt(_FakeUpload(), button_return=False)
+    _patch_dashboard_st(monkeypatch, fake)
+
+    result = dashboard._render_resume_section(config)
+
+    assert calls == []  # selecting a file must NOT fire the Gemini parse
+    assert result is None  # falls back to configured-skills mode
+    assert "resume_profile" not in fake.session_state
+
+
+def test_failed_parse_retries_with_exactly_one_additional_call(monkeypatch, config):
+    calls = []
+
+    def flaky_complete_json(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("503 transient")
+        return {"skills": ["python"], "seniority": "mid"}
+
+    monkeypatch.setattr("edgedash.llm.complete_json", flaky_complete_json)
+    monkeypatch.setattr(resume, "extract_pdf_text", lambda data: "resume text")
+    fake = _FakeSt(_FakeUpload(), button_return=True)
+    _patch_dashboard_st(monkeypatch, fake)
+
+    # First click: transient Gemini failure — error shown, nothing stored.
+    dashboard._render_resume_section(config)
+    assert len(calls) == 1
+    assert "resume_profile" not in fake.session_state
+    assert fake.errors  # the user sees why it failed and can retry
+
+    # Second click: the retry succeeds — exactly ONE additional call.
+    with pytest.raises(_Rerun):
+        dashboard._render_resume_section(config)
+    assert len(calls) == 2
+    assert fake.session_state["resume_profile"]["skills"] == ["python"]
+    assert fake.session_state["resume_key"] == "report.pdf:1234"
 

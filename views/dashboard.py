@@ -303,46 +303,58 @@ def _render_resume_section(config) -> dict | None:
         key="resume_upload",
     )
 
-    profile = st.session_state.get("resume_profile")
-    if uploaded is None:
-        # A file was removed (or none uploaded) — drop any stale profile.
+    # A different file was selected — drop any now-stale profile so the
+    # panels fall back to the configured skills until the new file is
+    # analyzed explicitly.
+    file_key = f"{uploaded.name}:{uploaded.size}"
+    stored_key = st.session_state.get("resume_key")
+    if stored_key is not None and stored_key != file_key:
         st.session_state.pop("resume_profile", None)
         st.session_state.pop("resume_key", None)
-        st.caption("Matching against configured skills")
-        return None
+    profile = st.session_state.get("resume_profile")
 
-    # Parse only when the file actually changes — each parse costs exactly
-    # one Gemini call, so identical re-uploads must not re-bill.
-    file_key = f"{uploaded.name}:{uploaded.size}"
-    if st.session_state.get("resume_key") != file_key or profile is None:
+    if profile is not None and stored_key == file_key:
+        skill_count = len(profile.get("skills", []))
+        st.success(
+            "Matching against your resume: uploaded, showing personalized "
+            f"results ({skill_count} skills, "
+            f"{profile.get('seniority', 'unknown')} level)."
+        )
+        if st.button("Clear resume", key="resume_clear"):
+            # Reset the uploader widget itself and fall back to the
+            # configured-skills mode.
+            for state_key in ("resume_profile", "resume_key", "resume_upload"):
+                st.session_state.pop(state_key, None)
+            st.rerun()
+        st.caption("Clear the resume to return to the configured skills.")
+        return profile
+
+    # A file is selected but not yet successfully analyzed. The Gemini parse
+    # fires ONLY here, on an explicit button click — never as a side effect
+    # of an unrelated rerun — so a transient failure costs exactly one call
+    # per deliberate click, and retrying is just clicking the button again.
+    if st.button(
+        f"Analyze resume — {uploaded.name}", type="primary", key="resume_analyze"
+    ):
         try:
             with st.spinner("Reading your resume (one Gemini call)..."):
                 profile = resume_module.parse_resume(
                     uploaded.getvalue(), uploaded.type, config
                 )
         except ValueError as error:
-            st.session_state.pop("resume_profile", None)
-            st.session_state.pop("resume_key", None)
             st.error(f"Could not read that resume: {error}")
-            st.caption("Matching against configured skills")
-            return None
         except Exception as error:
             LOGGER.error("Resume parse failed: %s", redact_error(error))
-            st.session_state.pop("resume_profile", None)
-            st.session_state.pop("resume_key", None)
-            st.error("Could not analyze that resume right now. Please try again later.")
-            st.caption("Matching against configured skills")
-            return None
-        st.session_state["resume_profile"] = profile
-        st.session_state["resume_key"] = file_key
-
-    skill_count = len(profile.get("skills", []))
-    st.success(
-        f"Matching against your resume: uploaded, showing personalized results "
-        f"({skill_count} skills, {profile.get('seniority', 'unknown')} level). "
-        f"Clear the uploader to return to the configured skills."
-    )
-    return profile
+            st.error(
+                "Could not analyze that resume right now. "
+                'Click "Analyze resume" to try again.'
+            )
+        else:
+            st.session_state["resume_profile"] = profile
+            st.session_state["resume_key"] = file_key
+            st.rerun()
+    st.caption("Matching against configured skills until the resume is analyzed.")
+    return None
 
 
 def main() -> None:
