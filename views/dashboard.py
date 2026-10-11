@@ -428,13 +428,16 @@ def main() -> None:
         st.caption("Matching against configured skills")
 
     st.markdown("## Ask your data")
+    active_profile = st.session_state.get("resume_profile")
     st.caption(
         "Each question uses 2 Gemini API calls and is answered from the "
-        "scheduled pipeline's verified dataset. "
+        "scheduled pipeline's verified dataset, with short-term memory of "
+        "this conversation for follow-up questions. The conversation stays "
+        "in your session only - it is never written to the database. "
         + (
             "'Best-fit roles' questions are ranked against your uploaded "
             "resume; all other answers reflect the configured skills."
-            if st.session_state.get("resume_profile") is not None
+            if active_profile is not None
             else "All answers reflect the configured target skills."
         )
     )
@@ -449,52 +452,96 @@ def main() -> None:
             "Try again tomorrow."
         )
 
-    if st.session_state.get("resume_profile") is not None:
-        example_questions = [
-            "Find the best-fit roles from my resume",
-            "Which companies are hiring this week?",
-            "What are the top skill gaps?",
-        ]
-    else:
-        example_questions = [
-            "Which companies are hiring this week?",
-            "What are the top skill gaps?",
-            "How many listings are scored?",
-        ]
-    example_columns = st.columns(3)
-    for column, example in zip(example_columns, example_questions):
-        if column.button(
-            example,
-            key=f"example_{example}",
-            disabled=daily_cap_reached,
-        ):
-            # Only pre-fill the question input. The query must be triggered
-            # solely by the "Ask" button: every question costs Gemini API
-            # quota (2 calls each), so a suggestion click must never fire a
-            # query on its own.
-            st.session_state["query_question"] = example
-    question = st.text_input(
-        "Question",
-        key="query_question",
-        placeholder="Which companies are hiring this week?",
+    # Reset the conversation whenever the resume profile changes (cleared,
+    # replaced, or re-analyzed) so stale personalized answers never linger.
+    fingerprint = None
+    if active_profile is not None:
+        fingerprint = (
+            tuple(active_profile.get("skills", [])),
+            active_profile.get("seniority"),
+        )
+    if st.session_state.get("chat_resume_fingerprint") != fingerprint:
+        st.session_state["chat_resume_fingerprint"] = fingerprint
+        st.session_state["chat_history"] = []
+
+    history = st.session_state.setdefault("chat_history", [])
+
+    # Suggestions are plain text, not buttons: st.chat_input cannot be
+    # pre-filled in Streamlit 1.58, and nothing here may fire a query
+    # without an explicit send (each question costs Gemini API quota).
+    if not history:
+        example_questions = (
+            [
+                "Find the best-fit roles from my resume",
+                "Which companies are hiring this week?",
+                "What are the top skill gaps?",
+            ]
+            if active_profile is not None
+            else [
+                "Which companies are hiring this week?",
+                "What are the top skill gaps?",
+                "How many listings are scored?",
+            ]
+        )
+        st.caption("Try asking: " + "  \u00b7  ".join(example_questions))
+
+    clear_column, _spacer = st.columns([1, 4])
+    if history and clear_column.button("Clear conversation", key="chat_clear"):
+        st.session_state["chat_history"] = []
+        st.rerun()
+
+    # Fixed-height, scrollable message area so the conversation has real
+    # room without pushing the rest of the dashboard off the page.
+    chat_box = st.container(height=440, border=True)
+    with chat_box:
+        if not history:
+            st.caption("No questions yet - ask below to get started.")
+        for turn in history:
+            with st.chat_message("user"):
+                st.markdown(turn["question"])
+            with st.chat_message("assistant"):
+                st.markdown(turn["answer"])
+                with st.expander("Source rows"):
+                    if turn["rows"]:
+                        st.dataframe(
+                            turn["rows"], use_container_width=True, hide_index=True
+                        )
+                    else:
+                        st.caption("No rows for this turn.")
+
+    prompt = st.chat_input(
+        "Ask about your listings, skills, or best-fit roles...",
         disabled=daily_cap_reached,
+        key="chat_question",
     )
-    question_to_ask = question
-    if (
-        not daily_cap_reached
-        and st.button("Ask", type="primary")
-        and question_to_ask.strip()
-    ):
+    if prompt and prompt.strip() and not daily_cap_reached:
+        question_text = prompt.strip()
+        with st.chat_message("user"):
+            st.markdown(question_text)
         try:
-            session_timestamps = st.session_state.setdefault("query_timestamps", [])
-            answer = ask(
-                question_to_ask.strip(),
-                session_timestamps,
-                resume_profile=st.session_state.get("resume_profile"),
-            )
-            st.markdown(answer.text)
-            st.markdown("**Underlying rows**")
-            st.dataframe(answer.rows, use_container_width=True, hide_index=True)
+            with st.chat_message("assistant"):
+                with st.spinner("Checking your data..."):
+                    answer = ask(
+                        question_text,
+                        st.session_state.setdefault("query_timestamps", []),
+                        resume_profile=active_profile,
+                        history=list(history),
+                    )
+                st.markdown(answer.text)
+            # Persist the turn for future follow-ups (session-only, capped).
+            # The new bubbles are already rendered inline above; the scroll
+            # box shows this turn from the next interaction onwards.
+            st.session_state["chat_history"] = (
+                history
+                + [
+                    {
+                        "question": question_text,
+                        "answer": answer.text,
+                        "rows": answer.rows[:200],
+                        "tool": answer.tool_used,
+                    }
+                ]
+            )[-20:]
         except Exception as error:
             LOGGER.error("Ask your data request failed: %s", redact_error(error))
             st.error(

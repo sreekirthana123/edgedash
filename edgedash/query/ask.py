@@ -57,6 +57,48 @@ def _clean_question(question: Any) -> str:
     ).strip()
 
 
+HISTORY_MAX_TURNS = 6
+HISTORY_MAX_TEXT = 400  # characters per turn field inside prompt blocks
+
+
+def _clean_history(history: Any) -> list[dict]:
+    """Bound and sanitize conversation history for prompt injection.
+
+    Returns at most HISTORY_MAX_TURNS turns (newest last). Control characters
+    are stripped, each field is truncated, non-dict entries are dropped, and
+    turns containing suspicious prompt-injection patterns are excluded. The
+    result is prompt CONTEXT ONLY — it is never parsed into tool parameters.
+    """
+    if not isinstance(history, list):
+        return []
+    turns = []
+    for turn in history[-HISTORY_MAX_TURNS:]:
+        if not isinstance(turn, dict):
+            continue
+        question = _clean_question(turn.get("question"))[:HISTORY_MAX_TEXT]
+        answer = _clean_question(turn.get("answer"))[:HISTORY_MAX_TEXT]
+        if not question and not answer:
+            continue
+        if any(
+            pattern.search(question) or pattern.search(answer)
+            for pattern in SUSPICIOUS_PATTERNS
+        ):
+            continue
+        turns.append({"question": question, "answer": answer})
+    return turns
+
+
+def _history_block(turns: list[dict]) -> str:
+    """Render sanitized history as a prompt block, or '' when empty."""
+    if not turns:
+        return ""
+    lines = ["CONVERSATION SO FAR (oldest first):"]
+    for turn in turns:
+        lines.append(f"User: {turn['question']}")
+        lines.append(f"Assistant: {turn['answer']}")
+    return "\n".join(lines) + "\n\n"
+
+
 def _rejection(
     question: str,
     config: Config,
@@ -84,7 +126,7 @@ def _session_wait_seconds(session_timestamps: list[float], now: float) -> int:
     return max(1, int(SESSION_WINDOW_SECONDS - (now - min(recent)) + 0.999))
 
 
-def _routing_prompt(question: str) -> str:
+def _routing_prompt(question: str, history: list[dict] | None = None) -> str:
     """Build the model-facing routing prompt from the fixed tool registry."""
     tool_lines = []
     for name, metadata in TOOLS.items():
@@ -93,7 +135,8 @@ def _routing_prompt(question: str) -> str:
             f"  Parameters: {json.dumps(metadata['parameters'], sort_keys=True)}"
         )
     return (
-        f"QUESTION:\n{question}\n\n"
+        _history_block(_clean_history(history))
+        + f"QUESTION:\n{question}\n\n"
         "AVAILABLE TOOLS:\n"
         + "\n".join(tool_lines)
         + "\n\nReturn exactly one JSON object with exactly these three keys: "
@@ -115,9 +158,12 @@ def _available_tools_text() -> str:
     )
 
 
-def _phrase_prompt(question: str, rows: list[dict], summary: str) -> str:
+def _phrase_prompt(
+    question: str, rows: list[dict], summary: str, history: list[dict] | None = None
+) -> str:
     return (
-        "QUESTION:\n"
+        _history_block(_clean_history(history))
+        + "QUESTION:\n"
         f"{question}\n\n"
         "ROWS:\n"
         f"{json.dumps(rows, sort_keys=True, default=str)}\n\n"
@@ -171,16 +217,22 @@ def ask(
     question: str,
     session_timestamps: list[float] | None = None,
     resume_profile: dict[str, Any] | None = None,
+    history: list[dict] | None = None,
 ) -> Answer:
     """Route one question, execute its fixed tool, and phrase its rows.
 
     resume_profile is the dashboard's session resume profile (skills +
     seniority). It is injected server-side into needs_profile tools and is
     never part of the model-facing route parameters.
+
+    history is the conversation so far (list of {question, answer} dicts).
+    It is sanitized, bounded, and rendered as prompt context for resolving
+    follow-ups — it can never supply or alter tool parameters.
     """
     started = time.perf_counter()
     config = Config.load()
     storage.init_db(config.db_path)
+    cleaned_history = _clean_history(history)
     now = time.time()
     session_timestamps = session_timestamps if session_timestamps is not None else []
     wait_seconds = _session_wait_seconds(session_timestamps, now)
@@ -230,7 +282,7 @@ def ask(
     session_timestamps.append(now)
     try:
         route = llm.complete_json(
-            _routing_prompt(question),
+            _routing_prompt(question, cleaned_history),
             {"tool": "string|null", "params": "object", "confidence": "string"},
             config,
         )
@@ -285,7 +337,7 @@ def ask(
     summary = result["summary"]
     try:
         phrase = llm.complete_json(
-            _phrase_prompt(question, rows, summary),
+            _phrase_prompt(question, rows, summary, cleaned_history),
             {"text": "string"},
             config,
         )
