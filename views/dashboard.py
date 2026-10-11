@@ -430,16 +430,18 @@ def main() -> None:
     st.markdown("## Ask your data")
     active_profile = st.session_state.get("resume_profile")
     st.caption(
-        "Each question uses 2 Gemini API calls and is answered from the "
-        "scheduled pipeline's verified dataset, with short-term memory of "
-        "this conversation for follow-up questions. The conversation stays "
-        "in your session only - it is never written to the database. "
-        + (
-            "'Best-fit roles' questions are ranked against your uploaded "
-            "resume; all other answers reflect the configured skills."
-            if active_profile is not None
-            else "All answers reflect the configured target skills."
-        )
+        "2 Gemini API calls per question. The conversation stays in your "
+        "session only - it is never written to the database."
+    )
+    # Always read the provider/model from config so this line never goes
+    # stale when the pipeline's model changes.
+    provider_display = {"gemini": "Google Gemini"}.get(
+        str(config.llm_provider).lower(), config.llm_provider
+    )
+    st.caption(
+        f"Powered by {provider_display} ({config.llm_model}) - the model "
+        "only chooses from pre-written queries and phrases the answer; "
+        "it never writes SQL."
     )
 
     daily_cap = config.daily_query_cap
@@ -490,30 +492,38 @@ def main() -> None:
         st.session_state["chat_history"] = []
         st.rerun()
 
-    # Fixed-height, scrollable message area so the conversation has real
-    # room without pushing the rest of the dashboard off the page.
-    chat_box = st.container(height=440, border=True)
-    with chat_box:
-        if not history:
-            st.caption("No questions yet - ask below to get started.")
-        for turn in history:
-            with st.chat_message("user"):
-                st.markdown(turn["question"])
-            with st.chat_message("assistant"):
-                st.markdown(turn["answer"])
-                with st.expander("Source rows"):
-                    if turn["rows"]:
-                        st.dataframe(
-                            turn["rows"], use_container_width=True, hide_index=True
-                        )
-                    else:
-                        st.caption("No rows for this turn.")
+    # Compact empty state: no fixed-height box that would look like an
+    # inert text area. The scrollable area appears only once messages exist.
+    if not history:
+        st.caption("No questions yet - your conversation will appear here.")
+    else:
+        # Fixed-height, scrollable message area so the conversation has real
+        # room without pushing the rest of the dashboard off the page.
+        chat_box = st.container(height=440, border=True)
+        with chat_box:
+            for turn in history:
+                with st.chat_message("user"):
+                    st.markdown(turn["question"])
+                with st.chat_message("assistant"):
+                    st.markdown(turn["answer"])
+                    with st.expander("Source rows"):
+                        if turn["rows"]:
+                            st.dataframe(
+                                turn["rows"], use_container_width=True, hide_index=True
+                            )
+                        else:
+                            st.caption("No rows for this turn.")
 
-    prompt = st.chat_input(
-        "Ask about your listings, skills, or best-fit roles...",
-        disabled=daily_cap_reached,
-        key="chat_question",
-    )
+    # Inside a container, st.chat_input renders INLINE at the bottom of the
+    # section instead of being pinned to the bottom of the browser window
+    # (Streamlit 1.58 documents this pinning and the container workaround).
+    input_slot = st.container()
+    with input_slot:
+        prompt = st.chat_input(
+            "Ask about your listings, skills, or best-fit roles...",
+            disabled=daily_cap_reached,
+            key="chat_question",
+        )
     if prompt and prompt.strip() and not daily_cap_reached:
         question_text = prompt.strip()
         with st.chat_message("user"):

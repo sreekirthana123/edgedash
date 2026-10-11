@@ -244,7 +244,10 @@ def test_dashboard_cap_disables_chat_input(dashboard_env, monkeypatch):
         "edgedash.config.Config.load",
         staticmethod(
             lambda *a, **k: SimpleNamespace(
-                db_path=dashboard_env, daily_query_cap=0
+                db_path=dashboard_env,
+                daily_query_cap=0,
+                llm_provider="gemini",
+                llm_model="gemini-3.6-flash",
             )
         ),
     )
@@ -295,4 +298,87 @@ def test_dashboard_resume_change_resets_conversation(dashboard_env, monkeypatch)
     assert at.session_state["chat_history"] == []  # stale answers wiped
     assert at.session_state["chat_resume_fingerprint"] is None
     assert complete.call_count == 0
+
+
+def test_dashboard_chat_input_inline_and_empty_state_compact(
+    dashboard_env, monkeypatch
+):
+    complete = MagicMock()
+    monkeypatch.setattr("edgedash.query.ask.llm.complete_json", complete)
+
+    at = _run_dashboard(dashboard_env)
+
+    assert not at.exception
+    # The input exists with the expected placeholder.
+    assert len(at.chat_input) == 1
+    assert (
+        at.chat_input[0].placeholder
+        == "Ask about your listings, skills, or best-fit roles..."
+    )
+    # It renders INLINE: wrapped in a container (the documented Streamlit
+    # 1.58 mechanism to avoid page-bottom pinning).
+    source = pathlib.Path(DASHBOARD).read_text(encoding="utf-8")
+    assert "input_slot = st.container()" in source
+    assert (
+        source.index("input_slot = st.container()")
+        < source.index('key="chat_question"')
+    )
+    # Empty state is compact: the caption renders, and the fixed-height
+    # (440px) scroll box only exists inside the non-empty else branch.
+    captions = [caption.value for caption in at.caption]
+    assert any("No questions yet" in caption for caption in captions)
+    caption_pos = source.index(
+        "No questions yet - your conversation will appear here."
+    )
+    box_pos = source.index("st.container(height=440")
+    assert caption_pos < box_pos
+    assert "else:" in source[caption_pos:box_pos]
+
+
+def test_dashboard_renders_history_turns_in_chat_box(dashboard_env, monkeypatch):
+    complete = MagicMock()
+    monkeypatch.setattr("edgedash.query.ask.llm.complete_json", complete)
+
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(DASHBOARD, default_timeout=90)
+    at.session_state["chat_history"] = [
+        {
+            "question": "seeded question?",
+            "answer": "seeded answer.",
+            "rows": [{"x": 1}],
+            "tool": "listing_count",
+        }
+    ]
+    at.run()
+
+    assert not at.exception
+    texts = [element.value for element in at.markdown]
+    assert any("seeded question?" in text for text in texts)
+    assert any("seeded answer." in text for text in texts)
+
+
+def test_dashboard_model_line_reads_from_config(dashboard_env, monkeypatch):
+    monkeypatch.setattr(
+        "edgedash.config.Config.load",
+        staticmethod(
+            lambda *a, **k: SimpleNamespace(
+                db_path=dashboard_env,
+                daily_query_cap=200,
+                llm_provider="gemini",
+                llm_model="test-model-xyz",
+            )
+        ),
+    )
+    complete = MagicMock()
+    monkeypatch.setattr("edgedash.query.ask.llm.complete_json", complete)
+
+    at = _run_dashboard(dashboard_env)
+
+    assert not at.exception
+    captions = [caption.value for caption in at.caption]
+    model_line = next(caption for caption in captions if "Powered by" in caption)
+    assert "Google Gemini (test-model-xyz)" in model_line
+    assert "never writes SQL" in model_line
+
 
