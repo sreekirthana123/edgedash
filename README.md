@@ -1,5 +1,5 @@
-🚀 Built with Persistence by
-V Sree Kirthana
+# 🚀 Built with Persistence by <br> V Sree Kirthana
+
 
 📊 EdgeDash
 Stop guessing which jobs are actually worth your time.
